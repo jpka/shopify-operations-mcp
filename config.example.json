@@ -1,15 +1,19 @@
 {
   "shopify": {
-    "storeUrl": "your-store.myshopify.com",
-    "accessToken": "shpat_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-    "apiVersion": "2026-01"
+    "storeDomain": "your-store.myshopify.com",
+    "apiVersion": "2026-04"
   },
-  "write": {
+  "plans": {
     "planTtlMs": 60000,
-    "approvalRequiredAboveCount": 1
+    "approvalRequiredAboveItems": 25,
+    "hardMaxItems": 250,
+    "maxPriceChangePct": 30,
+    "rollbackTtlMs": 86400000
   },
   "approvalServer": {
     "enabled": true,
     "port": 4319
-  }
+  },
+  "protectedTags": ["do-not-touch"],
+  "callerId": "unknown"
 }
