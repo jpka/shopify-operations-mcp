@@ -10,15 +10,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: "Check out safe-write-mcp-core (file: dependency, pre-publish)"
-        run: |
-          git clone --depth 1 https://github.com/jpka/safe-write-mcp-core.git ../safe-write-mcp-core
-          npm --prefix ../safe-write-mcp-core ci
-          npm --prefix ../safe-write-mcp-core run build
       - uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: npm
+      # safe-write-mcp-core is a file:../ dependency until jpka/safe-write-mcp-core#7
+      # publishes to npm. Pin to the exact core commit validated against locally;
+      # bump deliberately when the core ships changes.
+      - name: "Check out safe-write-mcp-core (file: dependency, pre-publish)"
+        run: |
+          git clone https://github.com/jpka/safe-write-mcp-core.git ../safe-write-mcp-core
+          git -C ../safe-write-mcp-core checkout 2280d821bd545cc76acd88c00567b509a6d904ab
+          npm --prefix ../safe-write-mcp-core ci
+          npm --prefix ../safe-write-mcp-core run build
       - run: npm ci
       - run: npm run lint
       - run: npm test

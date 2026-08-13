@@ -11,7 +11,11 @@
  *   (the stored `hash` field itself is excluded from the hashed input).
  * - The first row's `prev_hash` is the genesis marker: 64 zero hex chars.
  *   Every later row's `prev_hash` equals the previous row's `hash`, so any
- *   edit, deletion, or reordering of a row breaks the chain at that row.
+ *   edit, reordering, or deletion of a non-terminal row breaks the chain at
+ *   that row. Deleting terminal rows (suffix truncation) or replacing the
+ *   whole file with another internally valid chain is NOT detectable from
+ *   the file alone — that requires an externally stored or signed
+ *   checkpoint anchoring the expected final hash.
  *
  * Durability: every `record()` opens no window — the file is opened once in
  * append mode (`O_APPEND`) and each record is written with a single
@@ -20,21 +24,30 @@
  * an MCP server's event rate is low and correctness beats throughput here;
  * the per-record fsync is the documented, deliberate tradeoff.
  *
+ * Failure semantics: if `writeSync` reports a short write or either call
+ * throws, the sink transitions to a failed state and drops (with a stderr
+ * report) every later record. It never throws or rejects. It does NOT retry
+ * the failed seq number — a row that fsync rejected may still exist on
+ * disk, so a retry could write an ambiguous duplicate.
+ *
  * Concurrency: single-writer only. `seq` and `prev_hash` are tracked
  * in-process, so a second process appending to the same file is out of
  * scope (it would silently duplicate seq numbers — verification would then
  * flag the duplicate, but the file would still be ambiguous). Two sinks in
  * the same process must never share a file.
  *
- * Restart safety: on open, the sink reads the last valid line of an existing
- * file and resumes `seq` and `prev_hash` from it, so a chain survives server
- * restarts. If the last line exists but is malformed, the factory throws —
- * an admin must inspect the audit file before the server starts.
+ * Restart safety: on open, the sink verifies the existing chain (via
+ * `verifyAuditChain`) and resumes `seq` and `prev_hash` from its last line,
+ * so a chain survives server restarts. If the existing chain does not
+ * verify, or the file cannot be opened, the factory throws — an admin must
+ * inspect the audit file before the server starts.
  *
- * PII contract: the sink records exactly the event it is given — it does not
- * redact. Customer emails and names must NEVER appear in the audit trail.
- * Hosts that build events from customer data must call `redactEvent()` (and
- * sanitize free-text `reason`/`detail` strings) before calling `record()`.
+ * PII contract: customer emails and names must NEVER appear in the audit
+ * trail. As defense-in-depth the sink strips top-level keys matching
+ * /customerEmail|customerName/i from every event before hashing and
+ * serializing (see `redactEvent`). Free-text `reason`/`detail` strings
+ * cannot be safely redacted by key, so hosts must sanitize those before
+ * calling `record()`.
  */
 import fs from "node:fs";
 import { createHash } from "node:crypto";
@@ -53,10 +66,11 @@ export interface JsonlAuditSink extends AuditSink {
 
 /**
  * Returns a shallow copy of `event` with any top-level keys matching
- * /customerEmail|customerName/i removed. Never mutates the input. Hosts that
- * attach customer data to events must pass the event through this before
- * `record()`. Free-text `reason`/`detail` fields are NOT scanned — hosts
- * must sanitize those strings themselves.
+ * /customerEmail|customerName/i removed. Never mutates the input. The sink
+ * applies this to every recorded event as defense-in-depth; hosts may also
+ * call it before `record()` when building events from customer data.
+ * Free-text `reason`/`detail` fields are NOT scanned — hosts must sanitize
+ * those strings themselves.
  */
 export function redactEvent<T extends object>(event: T): T {
   const out: Record<string, unknown> = { ...(event as Record<string, unknown>) };
@@ -113,20 +127,26 @@ export function createJsonlAuditSink(
 ): JsonlAuditSink {
   const { fsync = true } = options;
   const fd = fs.openSync(path, "a");
+  const fail = (msg: string): never => {
+    fs.closeSync(fd);
+    throw new Error(`audit sink: ${msg}`);
+  };
+
+  const existing = verifyAuditChain(path);
+  if (!existing.ok) {
+    const breakAt = existing.firstBreak ? ` (first break at seq ${existing.firstBreak.seq})` : "";
+    fail(`existing chain in ${path} does not verify${breakAt}`);
+  }
 
   let nextSeq = 1;
   let prevHash = GENESIS_PREV_HASH;
-  const resumeFrom = lastLineOf(path);
-  if (resumeFrom !== null) {
-    const last = JSON.parse(resumeFrom) as { seq?: unknown; hash?: unknown };
-    if (typeof last.seq !== "number" || typeof last.hash !== "string") {
-      fs.closeSync(fd);
-      throw new Error(`audit sink: last line of ${path} is not a valid chain row`);
-    }
+  if (existing.entries > 0) {
+    const last = JSON.parse(lastLineOf(path)!) as { seq: number; hash: string };
     nextSeq = last.seq + 1;
     prevHash = last.hash;
   }
 
+  let failed = false;
   let closed = false;
   return {
     record(event: AuditEvent): undefined {
@@ -134,13 +154,24 @@ export function createJsonlAuditSink(
         process.stderr.write(`audit sink: record() after close ignored for ${path}\n`);
         return undefined;
       }
+      if (failed) {
+        process.stderr.write(
+          `audit sink: record() dropped for ${path}: sink is failed after an earlier write error\n`,
+        );
+        return undefined;
+      }
       const seq = nextSeq;
-      const hash = hashRow(seq, prevHash, event);
-      const line = JSON.stringify({ seq, prev_hash: prevHash, hash, ...event });
+      const safe = redactEvent(event);
+      const hash = hashRow(seq, prevHash, safe);
+      const line = Buffer.from(`${JSON.stringify({ seq, prev_hash: prevHash, hash, ...safe })}\n`);
       try {
-        fs.writeSync(fd, line + "\n");
+        const written = fs.writeSync(fd, line);
+        if (written !== line.byteLength) {
+          throw new Error(`short write: ${written} of ${line.byteLength} bytes`);
+        }
         if (fsync) fs.fsyncSync(fd);
       } catch (err) {
+        failed = true;
         const msg = err instanceof Error ? err.message : String(err);
         process.stderr.write(`audit sink: failed to record seq ${seq} to ${path}: ${msg}\n`);
         return undefined;

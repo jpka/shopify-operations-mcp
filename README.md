@@ -23,7 +23,11 @@ Every audit event is appended as one JSON line to a JSONL file:
 - `prev_hash` — the previous row's `hash`; the first row uses the genesis
   marker of 64 zero hex chars.
 
-Any edit, deletion, or reordering of a row breaks the chain at that row.
+Any edit, reordering, or deletion of a **non-terminal** row breaks the
+chain at that row. Deleting terminal rows (truncating the suffix) or
+replacing the whole file with another internally valid chain is not
+detectable from the file alone — anchor the expected final hash in an
+externally stored or signed checkpoint if you need to detect that.
 
 ### Durability and concurrency
 
@@ -34,18 +38,22 @@ Any edit, deletion, or reordering of a row breaks the chain at that row.
 - **Single-writer only.** `seq` is tracked in-process; a second process
   appending to the same file is out of scope (verification flags the
   resulting duplicate seq, but the file becomes ambiguous).
-- `record()` never throws: on a write failure it reports to stderr and
-  drops the event. Startup is fail-fast — if the file cannot be opened or
-  its last line is malformed, `createJsonlAuditSink` throws.
+- `record()` never throws: on a write error (including a short write or a
+  failed fsync) the sink reports to stderr, enters a failed state, and drops
+  every later record. It never retries the failed seq — the row may exist
+  on disk despite the failed fsync, and a retry could write an ambiguous
+  duplicate. Startup is fail-fast: if the file cannot be opened or the
+  existing chain does not verify, `createJsonlAuditSink` throws.
 
 ### PII: what may and must never be recorded
 
 Order/product IDs and amounts ARE recorded. **Customer emails and names
-must NEVER be recorded.** The sink records exactly the event it is given —
-it does not redact on its own. Hosts building events from customer data
-must pass events through `redactEvent()` (drops top-level keys matching
-`/customerEmail|customerName/i`) and sanitize free-text `reason`/`detail`
-strings before calling `record()`.
+must NEVER be recorded.** As defense-in-depth the sink strips top-level
+keys matching `/customerEmail|customerName/i` from every event before
+hashing and serializing (`redactEvent()` — also exported for hosts that
+want to redact before building events). Free-text `reason`/`detail`
+strings cannot be redacted by key, so hosts must sanitize those before
+calling `record()`.
 
 ### Verifying the chain
 
@@ -61,7 +69,11 @@ exits 1.
 
 The JSONL chain detects tampering — it does not prevent it. Unlike the
 Postgres audit model (with its append-only database grants), anyone with
-write access to the audit file can truncate, rewrite, or replace the whole
-chain; verification only *detects* that it happened. Treat the audit file
-as sensitive: restrict write access to the server process and archive
-signed copies off-box if you need stronger guarantees.
+write access to the audit file can truncate the suffix, rewrite, or
+replace the whole chain, and a truncated or replaced chain can still
+verify internally; verification only *detects* edits, reordering, and
+non-terminal deletions. Keep an externally stored (ideally signed)
+checkpoint of the expected final hash if you need to detect suffix
+truncation or full-chain replacement. Treat the audit file as sensitive:
+restrict write access to the server process and archive signed copies
+off-box for stronger guarantees.
