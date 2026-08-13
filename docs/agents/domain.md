@@ -18,7 +18,7 @@ If a file is missing or a ticket is unimplemented, **proceed silently** — don'
 
 Single-context repo:
 
-```
+```text
 /
 ├── AGENTS.md
 ├── DECISIONS.md
@@ -43,7 +43,7 @@ When your output names a domain concept (an issue title, a test name, a DECISION
 - **rollback** — re-applies snapshot `before` values as inverse mutations within `rollbackTtlMs` (`ROLLBACK_WINDOW_EXPIRED` after); no approval required.
 - **partial-failure ledger** — per-item success/failure outcomes recorded on every batch execute/rollback; partial failure is reported, never hidden.
 - **protectedTags** — tags plans may never modify (default `["do-not-touch"]`).
-- **audit** — the hash-chained JSONL trail (`seq` / `prev_hash` / `hash`; tamper-evident, not tamper-proof). Core `AuditStatus` values: `previewed`, `awaiting_approval`, `approved`, `executed`, `rejected`, `refused`, `failed`, `rolled_back`. Core `PlanError` codes: `UNKNOWN_TOKEN`, `PLAN_EXPIRED`, `PLAN_USED`, `PLAN_MISMATCH`, `AWAITING_APPROVAL`, `PLAN_REJECTED`.
+- **audit** — the hash-chained JSONL trail (`seq` / `prev_hash` / `hash`; tamper-evident, not tamper-proof). Core `AuditStatus` values: `previewed`, `awaiting_approval`, `approved`, `executed`, `rejected`, `refused`, `failed`, `rolled_back`. Core `PlanError` codes (the core only owns the token lifecycle — hosts extend it with their own domain codes): `UNKNOWN_TOKEN`, `PLAN_EXPIRED`, `PLAN_USED`, `PLAN_MISMATCH`, `AWAITING_APPROVAL`, `PLAN_REJECTED`; this repo's host-side extensions: `STATE_CHANGED`, `ROLLBACK_UNSUPPORTED`, `ROLLBACK_WINDOW_EXPIRED`.
 - **PII contract** — customer emails and names must never appear in the audit trail; record order/product IDs and amounts instead.
 
 ## Flag DECISIONS conflicts

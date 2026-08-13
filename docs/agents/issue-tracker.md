@@ -29,6 +29,6 @@ GitHub shares one number space across issues and PRs, so a bare `#42` may be eit
 
 The **map** is a single tracking issue labelled `wayfinder:map` — for this repo, the build map is issue #1. **Child tickets** reference the map with `Part of #1` at the top of their body.
 
-- **Frontier query**: list the map's open children (`gh issue list --state open`), drop any with an assignee; first in map order wins.
+- **Frontier query**: fetch the map (`gh issue view 1`), then filter the repo's open issues (`gh issue list --state open`) to those whose body starts with `Part of #1` and have no assignee; the first eligible child **in the map's checklist order** wins (not CLI result order).
 - **Blocking**: per the build map's note, canonical blocking is GitHub's native issue dependencies (`blocked_by`) within this repo; cross-repo blockers are body lines. A ticket is unblocked when every blocker is closed.
 - **Resolve**: `gh issue comment <n> --body "<answer>"`, then `gh issue close <n>`. When a ticket ships a decision, record it in `DECISIONS.md` (newest first).

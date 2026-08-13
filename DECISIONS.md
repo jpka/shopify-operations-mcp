@@ -36,6 +36,16 @@ something — a preview failure and an execute failure are categorically differe
 outcomes (no side effects vs. side effects recorded in the partial-failure ledger),
 and nothing about the preview API collapses them.
 
+**Scope of the concurrency guarantee, stated honestly:** `STATE_CHANGED` is a
+pre-write re-read — it catches drift that exists *before* the mutation is sent, and
+it is verified against the plan's fingerprint so it cannot be bypassed by a
+substituted payload. It does not close the window between the re-read and the
+mutation's write; Shopify exposes a provider-level compare-and-set for some
+operations (e.g. `changeFromQuantity` for inventory) but not all (plain price
+updates are last-write-wins), and the build plan's tickets specify the re-read as
+the concurrency check. Reaching for provider-level CAS where available is a possible
+hardening, not something the decision record claims already happens.
+
 **Alternative rejected:** "preview" as a dry-run against a sandboxed clone of the
 store. There is no sandbox that matches production data, and a dry-run that didn't
 run against the real items would produce a manifest the actual execute could not
@@ -221,3 +231,10 @@ the ledger says what *did*. The `STATE_CHANGED` re-read bounds the executor too 
 item whose current value drifted from the preview is refused rather than
 overwritten, so a partial failure never includes a stale-overwrite of data the
 preview didn't see.
+
+**Retry semantics, stated precisely:** the GraphQL client's backoff policy applies
+only where the outcome is known — the request was refused before application
+(`THROTTLED`, `429`, a `5xx` that never reached the mutation). An *ambiguous* outcome
+(a dropped connection mid-mutation, where the server may or may not have applied it)
+is never blindly retried — a retry could apply the mutation twice — and is recorded
+on the ledger without claiming success, the same as any other failure.
