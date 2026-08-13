@@ -6,6 +6,7 @@ import {
   type StateReader,
 } from "../../src/plans/manifest.js";
 import type { Executor, ItemOutcome } from "../../src/plans/executor.js";
+import type { RollbackTarget } from "../../src/tools/rollbackPlan.js";
 
 /**
  * Toy Shopify fixtures proving the two-phase framework: an in-memory product
@@ -128,6 +129,47 @@ export class ToyPriceExecutor implements Executor<PriceManifestItem, void> {
       };
     }
     this.store.set(item.after);
+    return { ref: item.ref, ok: true };
+  }
+}
+
+/**
+ * Re-applies one snapshot `before` value as an inverse mutation — the write
+ * half of rollback. Supports the same failRefs simulation as ToyPriceExecutor
+ * so tests can prove a partial rollback failure is recorded, never hidden.
+ */
+export class ToyRollbackExecutor
+  implements Executor<RollbackTarget<ToyProduct>, void>
+{
+  private failRefs: ReadonlySet<string>;
+
+  constructor(
+    private store: ToyStore,
+    failRefs: readonly string[] = [],
+  ) {
+    this.failRefs = new Set(failRefs);
+  }
+
+  execute(item: RollbackTarget<ToyProduct>): ItemOutcome<void> {
+    if (this.failRefs.has(item.ref)) {
+      return {
+        ref: item.ref,
+        ok: false,
+        error: {
+          code: "SIMULATED_FAILURE",
+          message: `toy executor configured to fail ${item.ref}`,
+        },
+      };
+    }
+    const current = this.store.get(item.ref);
+    if (!current) {
+      return {
+        ref: item.ref,
+        ok: false,
+        error: { code: "NOT_FOUND", message: `toy store: no product ${item.ref}` },
+      };
+    }
+    this.store.set(item.before);
     return { ref: item.ref, ok: true };
   }
 }
