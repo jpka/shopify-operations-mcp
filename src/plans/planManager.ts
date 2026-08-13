@@ -203,25 +203,35 @@ export class PlanManager<
     const current = await this.stateReader.readCurrent(
       manifest.items.map((item) => item.ref),
     );
-    const currentDigest = beforeDigestOf(
-      manifest.items.map((item) => ({
-        ref: item.ref,
-        before: current[item.ref],
-      })),
-    );
-    if (currentDigest !== meta.dataDigest) {
-      this.emit(
-        startedAt,
-        planToken,
-        "refused",
-        meta,
-        `STATE_CHANGED: the current state of one or more items differs from the previewed state`,
+
+    // For create operations (all items have before === null), skip the
+    // STATE_CHANGED drift check: there is no prior state to compare against.
+    // The beforeDigest was computed with null (item did not exist); after
+    // execute the state reader returns the created item, so digests differ
+    // by design — the "drift" is the intended create.
+    const isPureCreate = manifest.items.every((item) => item.before === null);
+
+    if (!isPureCreate) {
+      const currentDigest = beforeDigestOf(
+        manifest.items.map((item) => ({
+          ref: item.ref,
+          before: current[item.ref],
+        })),
       );
-      throw new ExecutionError(
-        "STATE_CHANGED",
-        "The current state of one or more items differs from what was previewed.",
-        "Another write changed matching data since the preview. Re-run the preview to obtain a fresh plan and token.",
-      );
+      if (currentDigest !== meta.dataDigest) {
+        this.emit(
+          startedAt,
+          planToken,
+          "refused",
+          meta,
+          `STATE_CHANGED: the current state of one or more items differs from the previewed state`,
+        );
+        throw new ExecutionError(
+          "STATE_CHANGED",
+          "The current state of one or more items differs from what was previewed.",
+          "Another write changed matching data since the preview. Re-run the preview to obtain a fresh plan and token.",
+        );
+      }
     }
 
     const ledger = await runLedger(manifest.items, this.executor);
