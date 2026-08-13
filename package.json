@@ -1,0 +1,56 @@
+{
+  "name": "shopify-operations-mcp",
+  "version": "0.1.0",
+  "description": "Safe-write Shopify operations MCP server: plan-before-execute writes with out-of-band approval and audit",
+  "mcpName": "io.github.jpka/shopify-operations-mcp",
+  "type": "module",
+  "license": "MIT",
+  "author": "jpka",
+  "homepage": "https://github.com/jpka/shopify-operations-mcp#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jpka/shopify-operations-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jpka/shopify-operations-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "shopify",
+    "claude",
+    "claude-desktop",
+    "llm-agent",
+    "safe-write",
+    "audit-log"
+  ],
+  "bin": {
+    "shopify-operations-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "config.example.json"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "lint": "tsc --noEmit",
+    "prepare": "npm run build"
+  },
+  "dependencies": {
+    "safe-write-mcp-core": "file:../safe-write-mcp-core"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

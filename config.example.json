@@ -1,0 +1,15 @@
+{
+  "shopify": {
+    "storeUrl": "your-store.myshopify.com",
+    "accessToken": "shpat_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "apiVersion": "2026-01"
+  },
+  "write": {
+    "planTtlMs": 60000,
+    "approvalRequiredAboveCount": 1
+  },
+  "approvalServer": {
+    "enabled": true,
+    "port": 4319
+  }
+}
