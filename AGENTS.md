@@ -10,3 +10,10 @@ shopify-operations-mcp: a safe-write MCP server for Shopify operations, built on
 - Triage labels: `needs-triage` (maintainer must evaluate), `needs-info` (waiting on reporter), `ready-for-agent` (fully specified, ready for an AFK agent), `ready-for-human` (requires human implementation), `wayfinder:map` (parent tracking issue). Drop `needs-triage` when a ticket is ready.
 - Verify before opening a PR: `npm run lint` (tsc --noEmit) and `npm test` (vitest) locally — CI runs the same on Node 24.
 - `safe-write-mcp-core` is a `file:` dependency until jpka/safe-write-mcp-core#7 publishes to npm; the registry dependency replaces it afterward.
+- Architectural decisions are recorded in `DECISIONS.md` (newest first), in the style of sw-postgres-mcp.
+
+## Agent docs
+
+- **Issue tracker** — `gh` CLI conventions, the PR-first workflow, and the build map: `docs/agents/issue-tracker.md`.
+- **Triage labels** — the five canonical labels and when to apply them: `docs/agents/triage-labels.md`.
+- **Domain docs** — what to read before exploring, and the codebase's vocabulary: `docs/agents/domain.md`.
