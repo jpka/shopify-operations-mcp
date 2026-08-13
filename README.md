@@ -4,8 +4,64 @@ Safe-write Shopify operations MCP server: plan-before-execute writes with
 out-of-band localhost approval and audit. Work is tracked as tickets in
 GitHub Issues (see the [build map](https://github.com/jpka/shopify-operations-mcp/issues/1)).
 
-> The MCP server itself lands in later tickets; this repo currently ships the
-> audit trail foundation (ticket #6) on top of `safe-write-mcp-core`.
+> The MCP server wiring itself lands in later tickets; this repo currently ships
+> the audit trail foundation (ticket #6), the two-phase plan framework (ticket
+> #9), and the read tools (ticket #7) on top of `safe-write-mcp-core`.
+
+## Tools
+
+### search_products (read)
+
+Find products/variants and their current pricing/inventory references. Reads
+only — never mutates. Protected items are returned but flagged, never filtered.
+
+Filters (all optional, ANDed into the Admin API `query` argument):
+
+- `title` — product title (Shopify fuzzy search)
+- `sku` — variant SKU
+- `vendor` — vendor
+- `tag` — product tag
+- `first` — page size for the internal cursor walk (default 50)
+
+The products connection is walked to completion via cursor pagination
+(`paginateConnection`), so every matching product is returned.
+
+Result shape:
+
+```ts
+interface SearchProductsResult {
+  products: ProductRef[];
+  count: number;
+  first: number; // page size used
+}
+
+interface ProductRef {
+  id: string;            // gid://shopify/Product/…
+  title: string;
+  vendor: string | null;
+  tags: string[];
+  variants: VariantRef[];
+  flags: ProtectedFlags; // protected tag annotation
+}
+
+interface VariantRef {
+  id: string;            // gid://shopify/ProductVariant/…
+  sku: string | null;
+  price: string;         // as Shopify stores it, e.g. "19.99"
+  inventoryItemId: string; // gid://shopify/InventoryItem/…
+  inventoryLevels: InventoryLevelRef[]; // per-location availability
+  flags: ProtectedFlags;
+}
+
+interface ProtectedFlags {
+  protected: boolean;      // true when a configured protected tag is present
+  protectedTags: string[]; // which configured tags matched (empty when safe)
+}
+```
+
+`InventoryLevelRef` carries `id`, `available` (units), `locationId`, and
+`locationName`. Items carrying a `protectedTags` tag are returned normally but
+with `flags.protected: true`, so a later write plan touching them is refused.
 
 ## Audit trail: tamper-evident JSONL (no database)
 
