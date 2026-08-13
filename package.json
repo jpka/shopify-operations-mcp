@@ -38,6 +38,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:integration": "vitest run --config vitest.integration.config.ts",
+    "verify-audit": "tsx scripts/verify-audit.ts",
     "lint": "tsc --noEmit",
     "prepare": "npm run build"
   },
