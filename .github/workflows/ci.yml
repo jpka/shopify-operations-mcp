@@ -10,6 +10,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Check out safe-write-mcp-core (file: dependency, pre-publish)
+        run: |
+          git clone --depth 1 https://github.com/jpka/safe-write-mcp-core.git ../safe-write-mcp-core
+          npm --prefix ../safe-write-mcp-core ci
+          npm --prefix ../safe-write-mcp-core run build
       - uses: actions/setup-node@v4
         with:
           node-version: 24
