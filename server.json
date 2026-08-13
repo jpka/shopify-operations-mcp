@@ -1,0 +1,35 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.jpka/shopify-operations-mcp",
+  "title": "shopify-operations-mcp",
+  "description": "Safe-write Shopify operations MCP server: plan-before-execute writes with out-of-band approval and audit.",
+  "repository": {
+    "url": "https://github.com/jpka/shopify-operations-mcp",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "shopify-operations-mcp",
+      "version": "0.1.0",
+      "transport": { "type": "stdio" },
+      "environmentVariables": [
+        {
+          "name": "SHOPIFY_STORE_DOMAIN",
+          "description": "The myshopify.com store domain, e.g. my-store.myshopify.com. Overrides shopify.storeDomain from the config file.",
+          "isRequired": true,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "SHOPIFY_ADMIN_TOKEN",
+          "description": "Shopify Admin API access token. Required and only ever read from the environment — never from the config file.",
+          "isRequired": true,
+          "isSecret": true,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}
