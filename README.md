@@ -1,135 +1,337 @@
 # shopify-operations-mcp
 
-Safe-write Shopify operations MCP server: plan-before-execute writes with
-out-of-band localhost approval and audit. Work is tracked as tickets in
-GitHub Issues (see the [build map](https://github.com/jpka/shopify-operations-mcp/issues/1)).
+Safe-write MCP server for Shopify Admin API operations — an agent can read and modify a Shopify store without being able to cause an unrecoverable accident. The safety layer is the differentiator: every write previews before it commits, large or irreversible changes require out-of-band human approval, and every action is recorded to a tamper-evident hash-chained audit file.
 
-> The MCP server wiring itself lands in later tickets; this repo currently ships
-> the audit trail foundation (ticket #6), the two-phase plan framework (ticket
-> #9), and the read tools (ticket #7) on top of `safe-write-mcp-core`.
+## Architecture
+
+```mermaid
+flowchart TB
+    subgraph agent["Agent"]
+        A[Claude]
+    end
+
+    subgraph mcp["MCP stdio transport"]
+        T[tools/call]
+    end
+
+    subgraph core["safe-write-mcp-core"]
+        PS[PlanStore]
+        AS[ApprovalServer]
+    end
+
+    subgraph shopify["Shopify Admin API"]
+        GQL[GraphQL endpoint<br/>/admin/api/2026-04/graphql.json]
+    end
+
+    subgraph audit["Audit"]
+        LF[JSONL audit file<br/>hash-chained]
+    end
+
+    A -->|"MCP stdio"| T
+    T -->|create plan| PS
+    T -->|preview| PS
+    T -->|execute plan| PS
+    PS -->|awaiting_approval| AS
+    AS -->|approve/reject| PS
+    PS -->|execute| GQL
+    PS -->|record| LF
+
+    style PS fill:#e1f5fe
+    style AS fill:#fff3e0
+    style LF fill:#f3e5f5
+    style GQL fill:#e8f5e9
+```
+
+**The two-phase pattern** (preview → token → execute) is the core discipline. Every write tool:
+
+1. **Preview** — reads current state and computes what would change, performing zero mutation calls
+2. **Token** — issues a plan token bound to the exact previewed manifest via a SHA-256 fingerprint
+3. **Approval** — plans exceeding `approvalRequiredAboveItems` (default 25) or containing always-gated operations wait for human approval at `http://127.0.0.1:4319/`
+4. **Execute** — re-reads current values, refuses if they drifted from the preview (`STATE_CHANGED`), then applies mutations per-item with a full success/failure ledger
+
+A plan whose manifest exceeds `hardMaxItems` (default 250) is refused outright — no token, no approval path.
+
+**Irreversible operations** (`cancel_order`, `refund_order`) always require approval regardless of item count and cannot be rolled back. Reversible operations (price changes, inventory adjustments) support rollback within a configurable window (default 24 hours).
+
+## Threat model
+
+The risk is **not** a malicious agent — the agent is trusted to author correct GraphQL. The risk is a **trusted-but-fallible** agent: syntactically perfect, well-formed operations whose *scope* is the problem.
+
+**The killer scenario** — a syntactically perfect bulk reprice with a misplaced decimal:
+
+```
+update_prices([...], newPrice: 1.5)   ← meant 15.00, typed 1.5
+```
+
+A 500-product bulk update that runs without preview-and-approve, or where the agent's price calculation contains a typo, produces exactly the wrong result at scale. Approval would catch it: a human sees "change 500 prices from $X to $1.50" and flags the不对劲. Without approval, or without the preview that makes the damage visible *before* it happens, the error lands silently in Shopify.
+
+Three mechanisms carry the safety guarantee:
+
+**1. Preview-first, computed-diff.** Every write tool reads current state and computes the manifest (`{ref, before, after}` pairs) without calling any mutation. A `STATE_CHANGED` re-read at execute time refuses the write if the world moved since preview. The blast radius is visible *before* anything changes.
+
+**2. Approval gating above the threshold.** Plans touching `>= approvalRequiredAboveItems` items (default 25) require human approval. The threshold is sized for "is this large enough to warrant a human eye?" — meaningful for bulk value changes; irrelevant for one-item operations (which get unconditional approval for irreversible ops instead).
+
+**3. Plan token bound to exact manifest.** The token is a SHA-256 fingerprint of the exact previewed manifest — not an opaque ID. Swapping in a wider set of items or a different price at execute time produces a different fingerprint and is refused as `STATEMENT_MISMATCH`.
+
+Rollback provides recovery for reversible mistakes (wrong price, wrong inventory level) within the rollback window. It does *not* recover from the irreversible operations: a cancelled order stays cancelled, a refunded payment stays refunded.
+
+## Quick start
+
+```bash
+npm install
+npm test
+npm run build
+```
+
+Set the required environment variable and point Claude Desktop at the server (see Configuration below). `node dist/index.js` starts the [localhost approval UI](#localhost-approval-ui) alongside the MCP stdio server.
+
+## Configuration
+
+Configuration file (default `config.json` in the working directory, or path via `SHOPIFY_CONFIG`):
+
+```json
+{
+  "shopify": {
+    "storeDomain": "my-store.myshopify.com",
+    "apiVersion": "2026-04"
+  },
+  "plans": {
+    "planTtlMs": 60000,
+    "approvalRequiredAboveItems": 25,
+    "hardMaxItems": 250,
+    "maxPriceChangePct": 30,
+    "rollbackTtlMs": 86400000
+  },
+  "approvalServer": {
+    "enabled": true,
+    "port": 4319
+  },
+  "protectedTags": ["do-not-touch"],
+  "callerId": "shopify-operations-mcp"
+}
+```
+
+### Config reference
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `shopify.storeDomain` | `string` | *(required)* | MyShopify domain, e.g. `"my-store.myshopify.com"` |
+| `shopify.apiVersion` | `string` | `"2026-04"` | Pinned quarterly Admin API version |
+| `shopify.adminToken` | `string` | *(env only)* | Admin API token — **never in config file**, only `SHOPIFY_ADMIN_TOKEN` env var |
+| `plans.planTtlMs` | `positive int` | `60000` | How long a plan token stays valid (ms). Overridable: `SHOPIFY_PLAN_TTL_MS` |
+| `plans.approvalRequiredAboveItems` | `positive int` | `25` | Plans touching this many items require human approval. Overridable: `SHOPIFY_APPROVAL_REQUIRED_ABOVE_ITEMS` |
+| `plans.hardMaxItems` | `positive int` | `250` | Plans exceeding this item count are refused outright. Overridable: `SHOPIFY_HARD_MAX_ITEMS` |
+| `plans.maxPriceChangePct` | `positive int` | `30` | Price changes exceeding this % require approval. Overridable: `SHOPIFY_MAX_PRICE_CHANGE_PCT` |
+| `plans.rollbackTtlMs` | `positive int` | `86400000` | Rollback window (ms, default 24h). Overridable: `SHOPIFY_ROLLBACK_TTL_MS` |
+| `approvalServer.enabled` | `boolean` | `true` | Start localhost approval UI alongside MCP server. Overridable: `SHOPIFY_APPROVAL_SERVER_ENABLED` |
+| `approvalServer.port` | `positive int` | `4319` | Port for localhost approval UI (127.0.0.1 only). Overridable: `SHOPIFY_APPROVAL_SERVER_PORT` |
+| `protectedTags` | `string[]` | `["do-not-touch"]` | Tags that plans may never modify. Overridable: `SHOPIFY_PROTECTED_TAGS` (comma-separated) |
+| `callerId` | `string` | `"unknown"` | Identity recorded on every audit row. Overridable: `SHOPIFY_CALLER_ID` |
+
+**Invariant:** `plans.hardMaxItems` must be `>= plans.approvalRequiredAboveItems`. The loader throws if violated.
+
+### Environment variables
+
+All config fields are overridable by environment variables (precedence: env > config file > default). `SHOPIFY_ADMIN_TOKEN` is **required** and only ever read from the environment.
 
 ## Tools
 
-### search_products (read)
+### Read tools
 
-Find products/variants and their current pricing/inventory references. Reads
-only — never mutates. Protected items are returned but flagged, never filtered.
+#### `search_products`
 
-Filters (all optional, ANDed into the Admin API `query` argument):
+Search products by title, SKU, vendor, or tag. Returns products with variants, current prices, and per-location inventory levels.
 
-- `title` — product title (Shopify fuzzy search)
-- `sku` — variant SKU
-- `vendor` — vendor
-- `tag` — product tag
-- `first` — page size for the internal cursor walk (default 50)
+**Arguments:**
 
-The products connection is walked to completion via cursor pagination
-(`paginateConnection`), so every matching product is returned.
+| Field | Type | Description |
+|---|---|---|
+| `title` | `string?` | Matches products whose title contains the term (Shopify fuzzy search) |
+| `sku` | `string?` | Matches products with a variant whose SKU equals the term |
+| `vendor` | `string?` | Matches products from this vendor |
+| `tag` | `string?` | Matches products carrying this tag |
+| `first` | `positive int?` | Page size passed to Admin API (default 50) |
 
-Result shape:
+**Returns:** `products[]` with `id`, `title`, `vendor`, `tags`, `variants` (each with `id`, `sku`, `price`, `inventoryItemId`, `inventoryLevels`), plus `flags.protected` / `flags.protectedTags` indicating whether the product carries a protected tag.
 
-```ts
-interface SearchProductsResult {
-  products: ProductRef[];
-  count: number;
-  first: number; // page size used
-}
+**Safety properties:** Pure read — zero mutation calls. Protected-tagged products are returned (never filtered out) so a later write plan that touches them is refused.
 
-interface ProductRef {
-  id: string;            // gid://shopify/Product/…
-  title: string;
-  vendor: string | null;
-  tags: string[];
-  variants: VariantRef[];
-  flags: ProtectedFlags; // protected tag annotation
-}
+#### `list_orders`
 
-interface VariantRef {
-  id: string;            // gid://shopify/ProductVariant/…
-  sku: string | null;
-  price: string;         // as Shopify stores it, e.g. "19.99"
-  inventoryItemId: string; // gid://shopify/InventoryItem/…
-  inventoryLevels: InventoryLevelRef[]; // per-location availability
-  flags: ProtectedFlags;
-}
+List orders filtered by financial status, fulfillment status, and date range.
 
-interface ProtectedFlags {
-  protected: boolean;      // true when a configured protected tag is present
-  protectedTags: string[]; // which configured tags matched (empty when safe)
-}
+**Arguments:**
+
+| Field | Type | Description |
+|---|---|---|
+| `financialStatus` | `FinancialStatus?` | `"pending" \| "authorized" \| "partially_paid" \| "paid" \| "partially_refunded" \| "refunded" \| "voided"` |
+| `fulfillmentStatus` | `FulfillmentStatus?` | `"fulfilled" \| "partial" \| "unfulfilled"` |
+| `createdAfter` | `ISO-8601 string?` | Orders created at or after this datetime |
+| `createdBefore` | `ISO-8601 string?` | Orders created at or before this datetime |
+| `first` | `positive int?` | Page size (default 250) |
+
+**Returns:** `orders[]` with `id`, `name`, `financialStatus`, `fulfillmentStatus`, `totalPrice`, `lineItems[]`.
+
+**Safety properties:** Pure read — zero mutation calls.
+
+### Write tools (two-phase)
+
+All write tools go through **preview → token → (approval) → execute**.
+
+#### `update_inventory`
+
+Set absolute inventory quantities at a named location for multiple inventory items. Preview reads current levels; execute calls `inventorySetQuantities`.
+
+**Arguments:**
+
+| Field | Type | Description |
+|---|---|---|
+| `locationId` | `string` | `gid://shopify/Location/…` id |
+| `adjustments` | `InventoryAdjustment[]` | Each `{inventoryItemId, quantity}` sets the available quantity at `locationId` |
+
+**Safety properties:**
+- Threshold gating: requires approval when `adjustments.length >= approvalRequiredAboveItems` (default 25); refused outright when `> hardMaxItems` (default 250)
+- Protected-tag enforcement: plans touching a product with a protected tag throw `PROTECTED_RESOURCE` before a token is issued — no approval path
+- Per-item ledger: partial failure is recorded, never hidden
+- Rollback: supported — restores `before.available` quantities via the snapshot
+
+#### `cancel_order`
+
+Cancel a Shopify order. **Always requires approval** regardless of item count. **Cannot be rolled back.**
+
+**Arguments:**
+
+| Field | Type | Description |
+|---|---|---|
+| `orderId` | `string` | `gid://shopify/Order/…` id |
+| `reason` | `string` | `"customer" \| "inventory" \| "fraud" \| "other"` |
+| `restock` | `boolean` | Return items to inventory |
+| `notifyCustomer` | `boolean` | Send cancellation email |
+
+**Safety properties:**
+- **Always approval**: `alwaysRequireApproval: true` is hardcoded in the tool — approval thresholds are never consulted
+- **No snapshot**: no `snapshotStore.capture()` call — rollback is not opened for this operation
+- **Rollback**: refused with `ROLLBACK_UNSUPPORTED` — cancellation is a state transition, not a value change
+
+#### `refund_order`
+
+Refund a Shopify order. **Always requires approval** regardless of item count. **Cannot be rolled back.**
+
+**Arguments:**
+
+| Field | Type | Description |
+|---|---|---|
+| `orderId` | `string` | `gid://shopify/Order/…` id |
+| `refundLineItems` | `RefundLineItem[]?` | Line items and quantities to refund; absent = full refund of all fulfilled items |
+| `reason` | `string` | Human-readable reason recorded in audit |
+
+Each `RefundLineItem`: `{lineItemId, quantity, restockType?}` where `restockType` is `"RETURN" \| "NO_RESTOCK" \| "CANCEL"`.
+
+**Safety properties:**
+- **Always approval**: `alwaysRequireApproval: true` hardcoded in the tool
+- **Preview via `refundCalculate`**: zero-write GraphQL call returns exact suggested refund amounts for the approval surface
+- **No snapshot**: no rollback support
+- **PII-free audit**: only order ID and refund amount are recorded; customer name/email are never in the audit trail
+
+#### `rollback_plan`
+
+Undo an executed reversible plan within the rollback window (default 24 hours).
+
+**Arguments:**
+
+| Field | Type | Description |
+|---|---|---|
+| `planToken` | `string` | The token from the executed plan to roll back |
+
+**Safety properties:**
+- No approval required: restoring the prior state is the safe direction
+- Window guard: `ROLLBACK_WINDOW_EXPIRED` when the snapshot has expired or the plan was never previewed
+- Kind guard: `ROLLBACK_UNSUPPORTED` when the plan kind is `cancel_order` or `refund_order`
+- Inverse mutations only on refs that *succeeded* at execute time — a ref that failed is left untouched
+- Per-item ledger: partial rollback failure is recorded honestly
+
+### Plan lifecycle
+
+```
+Agent calls preview tool
+       │
+       ▼
+  Manifest built
+  (pure reads, zero writes)
+       │
+       ▼
+  Item count checked
+       │
+       ├─── <= hardMaxItems ──► token issued
+       │                         │
+       │                    >= approvalRequiredAboveItems
+       │                         │     or alwaysRequireApproval
+       │                         ▼
+       │              status: "awaiting_approval"
+       │                         │
+       │                    human approves
+       │                         │
+       ▼                         │
+  HARD_MAX_ITEMS_EXCEEDED         │
+  (no token, refused)            ▼
+                           execute_plan
+                                │
+                           STATE_CHANGED check
+                           (re-read, compare digest)
+                                │
+                           ┌────┴────┐
+                        success   failure
+                           │         │
+                      per-item   per-item
+                      ledger     ledger
+                           │
+                      snapshot stored
+                      for rollback
 ```
 
-`InventoryLevelRef` carries `id`, `available` (units), `locationId`, and
-`locationName`. Items carrying a `protectedTags` tag are returned normally but
-with `flags.protected: true`, so a later write plan touching them is refused.
+## Localhost approval UI
 
-## Audit trail: tamper-evident JSONL (no database)
+A plain-HTML page for a human to approve or reject plans above the threshold. Runs as its own local-only HTTP server, started alongside the MCP server.
 
-Every audit event is appended as one JSON line to a JSONL file:
+- **Access:** `http://127.0.0.1:4319/` (or configured `approvalServer.port`) on the machine running the server. Unreachable from other machines.
+- **API:** `GET /api/plans` returns pending plans as JSON; `POST /api/plans/:token/approve` and `POST /api/plans/:token/reject` handle approval.
+- **Security boundary:** approval/rejection is **never** exposed as an MCP tool — the agent cannot approve its own plans.
+
+## Audit log
+
+Every preview, approval, execution, rejection, and refusal writes one JSON object to the audit file:
 
 ```json
-{"seq":1,"prev_hash":"0000000000000000000000000000000000000000000000000000000000000000","hash":"ab12…","ts":1700000000000,"tool":"update_prices",…}
+{"seq":1,"prev_hash":"0000...","hash":"ab12...","ts":1734567890000,"tool":"update_inventory","reason":"adjusting stock","planToken":"abc123","status":"executed","previewCount":10,"callerId":"shopify-ops","durationMs":234,"detail":"all 10 item(s) executed"}
 ```
 
-- `seq` — monotonically increasing per file, starting at 1; the chain
-  resumes after a server restart by continuing from the last stored line.
-- `hash` — sha256 over the *canonical row*: the JSON of
-  `{seq, prev_hash, …event fields}` in a fixed key order (the stored `hash`
-  itself is excluded from the hashed input).
-- `prev_hash` — the previous row's `hash`; the first row uses the genesis
-  marker of 64 zero hex chars.
+- `seq` — monotonically increasing per-file sequence
+- `prev_hash` — SHA-256 of the previous row (genesis = 64 zero chars)
+- `hash` — SHA-256 of this row (excluding the `hash` field itself)
+- **Tamper-evident, not tamper-proof:** editing, reordering, or deleting a non-terminal row breaks the chain at that row. Suffix truncation or replacing the whole file with a valid chain is *not* detectable from the file alone.
+- **PII defense-in-depth:** top-level keys matching `/customerEmail|customerName/i` are stripped before hashing. Free-text `reason`/`detail` strings are not scanned — hosts must sanitize those before calling `record()`.
+- **Restart safety:** on open, the sink verifies the existing chain and resumes `seq`/`prev_hash` from the last line.
 
-Any edit, reordering, or deletion of a **non-terminal** row breaks the
-chain at that row. Deleting terminal rows (truncating the suffix) or
-replacing the whole file with another internally valid chain is not
-detectable from the file alone — anchor the expected final hash in an
-externally stored or signed checkpoint if you need to detect that.
+Verify the chain with `scripts/verify-audit.ts`.
 
-### Durability and concurrency
+## Limitations
 
-- Each `record()` is a synchronous `writeSync` + `fsyncSync` on an
-  `O_APPEND` descriptor. fsync-per-record is a deliberate choice: event
-  volume is low and durability matters more than throughput here. Pass
-  `{fsync: false}` to the factory to skip per-record fsync.
-- **Single-writer only.** `seq` is tracked in-process; a second process
-  appending to the same file is out of scope (verification flags the
-  resulting duplicate seq, but the file becomes ambiguous).
-- `record()` never throws: on a write error (including a short write or a
-  failed fsync) the sink reports to stderr, enters a failed state, and drops
-  every later record. It never retries the failed seq — the row may exist
-  on disk despite the failed fsync, and a retry could write an ambiguous
-  duplicate. Startup is fail-fast: if the file cannot be opened or the
-  existing chain does not verify, `createJsonlAuditSink` throws.
+Stated plainly, not hidden:
 
-### PII: what may and must never be recorded
+- **Order cancels/refunds are irreversible.** Approval protects them — it does not enable rollback. A cancelled order cannot be uncancelled; a refunded payment cannot be unwired. RollbackPlan refuses `cancel_order` and `refund_order` tokens with `ROLLBACK_UNSUPPORTED`.
 
-Order/product IDs and amounts ARE recorded. **Customer emails and names
-must NEVER be recorded.** As defense-in-depth the sink strips top-level
-keys matching `/customerEmail|customerName/i` from every event before
-hashing and serializing (`redactEvent()` — also exported for hosts that
-want to redact before building events). Free-text `reason`/`detail`
-strings cannot be redacted by key, so hosts must sanitize those before
-calling `record()`.
+- **Rollback is best-effort snapshot restoration.** The snapshot captures the before-state at preview time; it is only usable as an inverse-mutation target while the world hasn't changed. After `rollbackTtlMs` (default 24h), rollback is refused with `ROLLBACK_WINDOW_EXPIRED`. Rollback restores values, not external side effects (e.g., a refund notification already sent).
 
-### Verifying the chain
+- **Partial failure leaves a per-item ledger, not an exception.** When a batch mutation fails for some items and succeeds for others, the executor records each outcome honestly. There is no all-or-nothing rollback across items — only per-item inverse mutations at rollback time for the items that succeeded.
 
-```sh
-npm run verify-audit -- <audit.jsonl>
-```
+- **Plan state is in-memory and process-scoped.** The PlanStore and SnapshotStore hold all pending and executed plan state in process memory. A server restart loses every pending plan (re-preview required) and every rollback window. The audit log is the durable record of what happened.
 
-Prints a summary (entries, last hash) and exits 0 when the chain is intact;
-on the first broken row it prints the seq and expected-vs-actual hash and
-exits 1.
+- **Single store, no multi-tenancy.** One server process talks to one Shopify store. Running for multiple stores means running multiple server instances with separate credentials and audit files.
 
-## Tamper-evident, NOT tamper-proof
+- **No per-user auth.** `callerId` identifies the deployment (default `"unknown"`), not an individual person. There is no per-MCP-session or per-user authentication in v1. Anyone who can reach the server's stdio transport (or `127.0.0.1:4319` for approvals) can use it with the configured store credentials.
 
-The JSONL chain detects tampering — it does not prevent it. Unlike the
-Postgres audit model (with its append-only database grants), anyone with
-write access to the audit file can truncate the suffix, rewrite, or
-replace the whole chain, and a truncated or replaced chain can still
-verify internally; verification only *detects* edits, reordering, and
-non-terminal deletions. Keep an externally stored (ideally signed)
-checkpoint of the expected final hash if you need to detect suffix
-truncation or full-chain replacement. Treat the audit file as sensitive:
-restrict write access to the server process and archive signed copies
-off-box for stronger guarantees.
+- **`STATE_CHANGED` is a pre-write drift check, not a universal compare-and-swap.** The re-read catches drift that exists *before* the mutation is sent. It does not close the window between re-read and write. Shopify exposes provider-level compare-and-swap for some operations (e.g. `changeFromQuantity` for inventory) but not all (plain price updates are last-write-wins).
+
+## License
+
+[MIT](./LICENSE)
