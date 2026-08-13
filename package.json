@@ -42,7 +42,8 @@
     "prepare": "npm run build"
   },
   "dependencies": {
-    "safe-write-mcp-core": "file:../safe-write-mcp-core"
+    "safe-write-mcp-core": "file:../safe-write-mcp-core",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
