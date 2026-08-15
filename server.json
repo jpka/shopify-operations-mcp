@@ -1,0 +1,77 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.jpka/shopify-operations-mcp",
+  "title": "shopify-operations-mcp",
+  "description": "Safe-write Shopify operations MCP server: plan-before-execute writes with out-of-band approval and audit.",
+  "repository": {
+    "url": "https://github.com/jpka/shopify-operations-mcp",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "shopify-operations-mcp",
+      "version": "0.1.0",
+      "transport": { "type": "stdio" },
+      "environmentVariables": [
+        {
+          "name": "SHOPIFY_STORE_DOMAIN",
+          "description": "The myshopify.com store domain, e.g. my-store.myshopify.com. Overrides shopify.storeDomain from the config file.",
+          "isRequired": true,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "SHOPIFY_ADMIN_TOKEN",
+          "description": "Shopify Admin API access token. Required and only ever read from the environment — never from the config file.",
+          "isRequired": true,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "SHOPIFY_CONFIG",
+          "description": "Path to a config.json with shopify/plans/approvalServer/protectedTags settings. Defaults to ./config.json in the working directory.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "SHOPIFY_PLAN_TTL_MS",
+          "description": "How long a plan token stays valid before it must be executed or expires, in milliseconds. Default 60000.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "SHOPIFY_APPROVAL_SERVER_PORT",
+          "description": "Port the localhost human-approval HTTP server binds to (127.0.0.1 only). Default 4319.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "SHOPIFY_PROTECTED_TAGS",
+          "description": "Comma-separated tags that plans may never modify; any plan touching an item carrying one is refused. Default do-not-touch.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "SHOPIFY_CALLER_ID",
+          "description": "Identity recorded as the caller on every audit log row. Default unknown.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "SHOPIFY_AUDIT_PATH",
+          "description": "File path for the tamper-evident JSONL audit log. Default shopify-operations-audit.jsonl in the working directory.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}

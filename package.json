@@ -44,6 +44,7 @@
     "prepare": "npm run build"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "safe-write-mcp-core": "file:../safe-write-mcp-core",
     "zod": "^4.4.3"
   },
