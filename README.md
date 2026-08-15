@@ -1,6 +1,6 @@
-# shopify-operations-mcp
+# Safe-write MCP server for Shopify Admin API operations
 
-Safe-write MCP server for Shopify Admin API operations — an agent can read and modify a Shopify store without being able to cause an unrecoverable accident. The safety layer is the differentiator: every write previews before it commits, large or irreversible changes require out-of-band human approval, and every action is recorded to a tamper-evident hash-chained audit file.
+An agent can read and modify a Shopify store without being able to cause an unrecoverable accident. The safety layer is the differentiator: every write previews before it commits, large or irreversible changes require out-of-band human approval, and every action is recorded to a tamper-evident hash-chained audit file.
 
 ## Architecture
 
