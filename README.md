@@ -314,6 +314,43 @@ Every preview, approval, execution, rejection, and refusal writes one JSON objec
 
 Verify the chain with `scripts/verify-audit.ts`.
 
+## Dev-store seeder
+
+`scripts/seed-store.ts` generates a realistic store to point the server at — deterministic, like sw-postgres-mcp's seeder. Everything is derived from a seeded PRNG (mulberry32), so two runs with the same seed produce identical data and identical counts.
+
+**Run it:**
+
+```bash
+SHOPIFY_STORE_DOMAIN=my-dev.myshopify.com SHOPIFY_ADMIN_TOKEN=shpat_... npm run seed -- --seed 42
+```
+
+The seeder reuses the server's `loadConfig`, so `SHOPIFY_STORE_DOMAIN` / `SHOPIFY_ADMIN_TOKEN` / `SHOPIFY_API_VERSION` (and any config file) are honored exactly as for the server; `--seed` defaults to `42`. Flags:
+
+- `--seed <number>` — PRNG seed; default `42`. Any two runs with the same seed are identical.
+- `--dry-run` — prints the plan counts and verifies the sizing invariants without making any API call (no credentials needed).
+- `--order-delay-ms <ms>` — sleep between order creates. Development stores cap `orderCreate` at five per minute, so plan ~24 minutes for the 120 orders; default is no delay.
+
+**Data shape (seed 42):**
+
+| Resource | Count | Notes |
+|---|---|---|
+| Products | 300 | titled `Seeded Product 1…300`, spread across 8 vendors and 8 product types |
+| Variants | 768 | 1–4 per product, SKUs `SEED-<product>-<variant>`, prices $5–$300 |
+| Locations | 2 | the first two locations in the store (locations are physical, not created) |
+| Customers | 20 | `seed-customer-N@example.com` |
+| Orders | 120 | Bogus-Gateway test orders (`test: true`, inventory bypassed) |
+
+Order-state mix: 116 paid / 4 pending; 40 fulfilled / 80 unfulfilled; 12 carry a fixed-amount discount code. Every product, customer, and order is tagged `seeded-store`.
+
+**Sizing invariants** (asserted against the loaded config before any API call — the seeder fails fast if they don't hold):
+
+- The full variant set (768) exceeds `hardMaxItems` (default 250), so a store-wide reprice is **refused** (`HARD_MAX_ITEMS_EXCEEDED`).
+- The `sale` tag covers 156 variants — between `approvalRequiredAboveItems` (default 25) and `hardMaxItems` (250) — so a reprice scoped to `tag:'sale'` **requests approval** but is not refused.
+
+The structural sizing is seed-independent: every 5th product (60 of 300) carries `sale`, and each product has 1–4 variants, so the `sale` tag always covers between 60 and 240 variants.
+
+**Idempotency:** a re-run first **wipes** every previously-seeded order, customer, and product tagged `seeded-store` (orders first — customers can only be deleted once their orders are gone), then regenerates. Products delete their variants and inventory items with them; the two locations are reused, never deleted. The script prints counts at the end so you can diff two runs.
+
 ## Limitations
 
 Stated plainly, not hidden:
