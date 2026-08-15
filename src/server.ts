@@ -168,7 +168,7 @@ const executePlanArgsSchema = z
               after: z.unknown(),
               payload: z.unknown().optional(),
             })
-            .passthrough(),
+            .strict(),
         ),
         digest: z.string(),
         beforeDigest: z.string(),
@@ -178,6 +178,19 @@ const executePlanArgsSchema = z
   .strict();
 
 const rollbackPlanArgsSchema = z.object({ planToken: z.string() }).strict();
+
+/** Server-level structured error, mirroring the host error convention. */
+class ServerError extends Error {
+  readonly code: string;
+  readonly hint?: string;
+
+  constructor(code: string, message: string, hint?: string) {
+    super(message);
+    this.name = "ServerError";
+    this.code = code;
+    this.hint = hint;
+  }
+}
 
 function text(content: string) {
   return { content: [{ type: "text", text: content }] as const };
@@ -262,7 +275,7 @@ function previewResponse(
 ) {
   const message =
     preview.status === "awaiting_approval"
-      ? "This plan requires human approval through the localhost approval UI before it will execute. Call execute_plan with this plan_token and the exact manifest above to await the human's decision: the call waits until a human approves it (it then executes), rejects it (you receive a structured PLAN_REJECTED error — adjust the operation and re-preview), or the plan expires."
+      ? "This plan requires human approval through the localhost approval UI before it will execute. execute_plan with this plan_token and the exact manifest above returns immediately with a structured AWAITING_APPROVAL error until the plan is approved; once a human approves it, call execute_plan again with the same plan_token and manifest to execute. A rejection returns a structured PLAN_REJECTED error — adjust the operation and re-preview. The plan expires if not executed within its TTL, in which case re-preview for a fresh token."
       : null;
   return text(
     JSON.stringify(
@@ -371,13 +384,27 @@ export function createServer(ctx: ServerContext): Server {
     ["refund_order", refundManager],
   ]);
 
-  const planKinds = new Map<string, string>();
-  const cancelArgs = new Map<string, CancelOrderArgs>();
-  const executedPlans = new Map<string, ExecutedPlan>();
+  // Per-plan routing and rollback state. Every entry carries an expiry so a
+  // token's identifiers are never retained past its plan/rollback window.
+  const planKinds = new Map<string, { kind: string; expiresAt: number }>();
+  const cancelArgs = new Map<string, { args: CancelOrderArgs; expiresAt: number }>();
+  const executedPlans = new Map<string, { plan: ExecutedPlan; expiresAt: number }>();
+  const planTtlMs = ctx.config.plans.planTtlMs;
+  const rollbackTtlMs = ctx.config.plans.rollbackTtlMs;
+
+  const pruneExpired = (): void => {
+    const now = Date.now();
+    for (const [token, entry] of planKinds) if (entry.expiresAt <= now) planKinds.delete(token);
+    for (const [token, entry] of cancelArgs) if (entry.expiresAt <= now) cancelArgs.delete(token);
+    for (const [token, entry] of executedPlans) if (entry.expiresAt <= now) executedPlans.delete(token);
+  };
 
   const rollbackPlan = new RollbackPlan<unknown, void>({
     snapshotStore: ctx.snapshotStore,
-    executedOf: (token) => executedPlans.get(token) ?? null,
+    executedOf: (token) => {
+      const entry = executedPlans.get(token);
+      return entry !== undefined && entry.expiresAt > Date.now() ? entry.plan : null;
+    },
     supportedKinds: ["update_prices", "update_inventory", "create_discount"],
     executor: new ShopifyRollbackExecutor(ctx.client),
     audit: ctx.audit,
@@ -575,7 +602,7 @@ export function createServer(ctx: ServerContext): Server {
                 "The value of the discount: for \"percentage\" a number between 0 and 100 (e.g. 20 for 20% off); for \"fixed_amount\" a decimal amount in the shop's currency (e.g. 10.00 for $10 off).",
             },
             usageLimit: {
-              type: "number",
+              type: ["number", "null"],
               description:
                 "Optional maximum number of times this discount can be used in total. Null means unlimited usage.",
             },
@@ -738,6 +765,7 @@ export function createServer(ctx: ServerContext): Server {
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name } = request.params;
     const args = request.params.arguments ?? {};
+    pruneExpired();
 
     if (name === "search_products") {
       const parsed = searchProductsArgsSchema.safeParse(args);
@@ -776,7 +804,7 @@ export function createServer(ctx: ServerContext): Server {
               maxPriceChangePct > ctx.config.plans.maxPriceChangePct,
           },
         );
-        planKinds.set(preview.planToken, "update_prices");
+        planKinds.set(preview.planToken, { kind: "update_prices", expiresAt: Date.now() + planTtlMs });
         return previewResponse(preview, ctx.config, "update_prices");
       } catch (err) {
         return errorBody(err);
@@ -796,7 +824,7 @@ export function createServer(ctx: ServerContext): Server {
           { build: () => Promise.resolve(manifest) },
           { tool: "update_inventory", reason: parsed.data.reason ?? null },
         );
-        planKinds.set(preview.planToken, "update_inventory");
+        planKinds.set(preview.planToken, { kind: "update_inventory", expiresAt: Date.now() + planTtlMs });
         return previewResponse(preview, ctx.config, "update_inventory");
       } catch (err) {
         return errorBody(err);
@@ -811,7 +839,7 @@ export function createServer(ctx: ServerContext): Server {
           new DiscountManifestBuilder(ctx.client, parsed.data, ctx.config),
           { tool: "create_discount", reason: parsed.data.reason ?? null },
         );
-        planKinds.set(preview.planToken, "create_discount");
+        planKinds.set(preview.planToken, { kind: "create_discount", expiresAt: Date.now() + planTtlMs });
         return previewResponse(preview, ctx.config, "create_discount");
       } catch (err) {
         return errorBody(err);
@@ -833,7 +861,7 @@ export function createServer(ctx: ServerContext): Server {
             alwaysRequireApproval: true,
           },
         );
-        planKinds.set(preview.planToken, "refund_order");
+        planKinds.set(preview.planToken, { kind: "refund_order", expiresAt: Date.now() + planTtlMs });
         return previewResponse(preview, ctx.config, "refund_order");
       } catch (err) {
         return errorBody(err);
@@ -851,8 +879,8 @@ export function createServer(ctx: ServerContext): Server {
           parsed.data,
           callerId,
         );
-        planKinds.set(result.planToken, TOOL_CANCEL_ORDER);
-        cancelArgs.set(result.planToken, parsed.data);
+        planKinds.set(result.planToken, { kind: TOOL_CANCEL_ORDER, expiresAt: Date.now() + planTtlMs });
+        cancelArgs.set(result.planToken, { args: parsed.data, expiresAt: Date.now() + planTtlMs });
         return text(
           JSON.stringify(
             {
@@ -861,7 +889,7 @@ export function createServer(ctx: ServerContext): Server {
               order_id: parsed.data.orderId,
               manifest: result.preview,
               message:
-                "Cancelling an order always requires human approval through the localhost approval UI before it will execute. Call execute_plan with this plan_token and the exact manifest above to await the human's decision.",
+                "Cancelling an order always requires human approval through the localhost approval UI before it will execute. execute_plan with this plan_token and the exact manifest above returns immediately with a structured AWAITING_APPROVAL error until the plan is approved; call execute_plan again with the same plan_token and manifest after approval to execute.",
             },
             null,
             2,
@@ -877,22 +905,23 @@ export function createServer(ctx: ServerContext): Server {
       if (!parsed.success) return invalidArguments(parsed.error);
       try {
         const planToken = parsed.data.plan_token;
-        const kind = planKinds.get(planToken);
-        if (kind === undefined) {
-          throw {
-            code: "UNKNOWN_PLAN_TOKEN",
-            message: `No plan matches token ${planToken} on this server.`,
-            hint: "Plan tokens are only valid after a preview on this server; re-run the preview to obtain a fresh plan_token.",
-          };
+        const kindEntry = planKinds.get(planToken);
+        if (kindEntry === undefined) {
+          throw new ServerError(
+            "UNKNOWN_PLAN_TOKEN",
+            `No plan matches token ${planToken} on this server.`,
+            "Plan tokens are only valid after a preview on this server; re-run the preview to obtain a fresh plan_token.",
+          );
         }
+        const kind = kindEntry.kind;
         if (kind === TOOL_CANCEL_ORDER) {
-          const cancelOrderArgsForToken = cancelArgs.get(planToken);
-          if (cancelOrderArgsForToken === undefined) {
-            throw {
-              code: "UNKNOWN_PLAN_TOKEN",
-              message: `No cancel_order plan matches token ${planToken} on this server.`,
-              hint: "Re-run the cancel_order preview to obtain a fresh plan_token.",
-            };
+          const cancelEntry = cancelArgs.get(planToken);
+          if (cancelEntry === undefined) {
+            throw new ServerError(
+              "UNKNOWN_PLAN_TOKEN",
+              `No cancel_order plan matches token ${planToken} on this server.`,
+              "Re-run the cancel_order preview to obtain a fresh plan_token.",
+            );
           }
           const result = await executeCancelOrder(
             ctx.client,
@@ -900,13 +929,18 @@ export function createServer(ctx: ServerContext): Server {
             ctx.audit,
             planToken,
             parsed.data.manifest as Manifest<CancelOrderManifestItem>,
-            cancelOrderArgsForToken,
+            cancelEntry.args,
             callerId,
           );
           executedPlans.set(planToken, {
-            kind: TOOL_CANCEL_ORDER,
-            executedRefs: result.succeededCount > 0 ? [cancelOrderArgsForToken.orderId] : [],
+            plan: {
+              kind: TOOL_CANCEL_ORDER,
+              executedRefs: result.succeededCount > 0 ? [cancelEntry.args.orderId] : [],
+            },
+            expiresAt: Date.now() + rollbackTtlMs,
           });
+          planKinds.delete(planToken);
+          cancelArgs.delete(planToken);
           return text(
             JSON.stringify(
               {
@@ -923,20 +957,22 @@ export function createServer(ctx: ServerContext): Server {
         }
         const manager = managers.get(kind);
         if (manager === undefined) {
-          throw {
-            code: "UNKNOWN_PLAN_KIND",
-            message: `No execution path is registered for plan kind "${kind}".`,
-            hint: "This plan kind cannot be executed through execute_plan; re-run the operation to obtain a fresh plan_token.",
-          };
+          throw new ServerError(
+            "UNKNOWN_PLAN_KIND",
+            `No execution path is registered for plan kind "${kind}".`,
+            "This plan kind cannot be executed through execute_plan; re-run the operation to obtain a fresh plan_token.",
+          );
         }
         const result = await manager.executePlan(
           planToken,
           parsed.data.manifest as Manifest<ManifestItem>,
         );
         executedPlans.set(planToken, {
-          kind,
-          executedRefs: result.ledger.succeeded.map((o) => o.ref),
+          plan: { kind, executedRefs: result.ledger.succeeded.map((o) => o.ref) },
+          expiresAt: Date.now() + rollbackTtlMs,
         });
+        planKinds.delete(planToken);
+        cancelArgs.delete(planToken);
         return text(
           JSON.stringify(
             {
