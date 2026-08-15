@@ -351,6 +351,32 @@ The structural sizing is seed-independent: every 5th product (60 of 300) carries
 
 **Idempotency:** a re-run first **wipes** every previously-seeded order, customer, and product tagged `seeded-store` (orders first — customers can only be deleted once their orders are gone), then regenerates. Products delete their variants and inventory items with them; the two locations are reused, never deleted. The script prints counts at the end so you can diff two runs.
 
+## Live integration suite
+
+`tests/integration/` is a **manual-only, env-gated** suite that proves the server against the real Admin API and the seeded dev store. It is deliberately kept out of CI: it needs real store credentials (secrets must never reach CI) and it makes rate-limited calls that would flake.
+
+**Run it:**
+
+```bash
+SHOPIFY_STORE_DOMAIN=my-dev.myshopify.com SHOPIFY_ADMIN_TOKEN=shpat_... npm run seed -- --seed 42
+SHOPIFY_STORE_DOMAIN=my-dev.myshopify.com SHOPIFY_ADMIN_TOKEN=shpat_... npm run test:integration
+```
+
+Re-seed before each run so the destructive tests find fresh candidate orders. With **no credentials**, the whole suite skips itself with a console note and exits 0 — `npm run test:integration` and the default `npm test` both pass as a no-op, and **it never runs on CI**.
+
+**What it covers** (each file is `describe.skip`-gated unless `SHOPIFY_STORE_DOMAIN` **and** `SHOPIFY_ADMIN_TOKEN` are set):
+
+| File | Proves |
+|---|---|
+| `readTools.test.ts` | `search_products` by vendor/tag/sku/title, first-page pagination, protected-tag flags (seeded products are all unprotected); `list_orders` financial/fulfillment filters. Product counts are exact seed-42 constants; order counts are tolerant bands (this suite's own destructive tests consume them) |
+| `updatePrices.test.ts` | `update_prices` two-phase against real variants: preview → execute a small change → verify → roll back via `rollback_plan` → verify restored |
+| `updateInventory.test.ts` | `update_inventory` two-phase against a real inventory item + location: preview → execute a +1 change → verify → roll back → verify restored |
+| `createDiscount.test.ts` | `create_discount` two-phase: preview → create → verify active → deactivate via rollback |
+| `cancelRefund.test.ts` | **DESTRUCTIVE** — exactly one real `cancel_order` and one real `refund_order`, preview → approve → execute, against paid/unfulfilled seeded orders discovered at runtime, asserting the audit-consistent success ledger |
+| `throttle.test.ts` | Cost-aware throttling: a parallel burst exceeding the API cost budget is absorbed by the default client (backoff); a no-retry client surfaces `ShopifyApiError` `SHOPIFY_THROTTLED` instead of an unknown error |
+
+Files run serially (`fileParallelism: false`) because the suite shares one mutable store — destructive writes must never race the read counts. Config: `vitest.integration.config.ts`.
+
 ## Limitations
 
 Stated plainly, not hidden:
