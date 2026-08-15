@@ -39,6 +39,7 @@
     "test:watch": "vitest",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "verify-audit": "tsx scripts/verify-audit.ts",
+    "seed": "tsx scripts/seed-store.ts",
     "lint": "tsc --noEmit",
     "prepare": "npm run build"
   },
