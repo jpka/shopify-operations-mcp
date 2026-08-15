@@ -313,7 +313,7 @@ export interface CancelOrderResult {
  */
 export async function cancelOrder(
   client: AdminClient,
-  planStore: PlanStore<Manifest<CancelOrderManifestItem>>,
+  planStore: PlanStore<Manifest<ManifestItem>>,
   audit: AuditSink,
   args: CancelOrderArgs,
   callerId: string = "unknown",
@@ -363,7 +363,7 @@ export async function cancelOrder(
 
 export async function executeCancelOrder(
   client: AdminClient,
-  planStore: PlanStore<Manifest<CancelOrderManifestItem>>,
+  planStore: PlanStore<Manifest<ManifestItem>>,
   audit: AuditSink,
   planToken: string,
   manifest: Manifest<CancelOrderManifestItem>,
