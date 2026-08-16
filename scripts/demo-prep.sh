@@ -13,9 +13,9 @@
 #                             [--no-server] [--baseline] [--stop-server]
 #                             [--store-domain <d>] [--audit-path <p>]
 #
-# Credentials come from SHOPIFY_STORE_DOMAIN + SHOPIFY_ADMIN_TOKEN (env or
-# --store-domain), falling back to the gitignored .env file (which may use the
-# legacy SHOPIFY_SHOP_DOMAIN name). The token is never committed.
+# --store-domain sets only SHOPIFY_STORE_DOMAIN; SHOPIFY_ADMIN_TOKEN comes
+# exclusively from the environment or the gitignored .env file (which may use
+# the legacy SHOPIFY_SHOP_DOMAIN name). The token is never committed.
 #
 # Idempotent: a re-run skips the seed when the store is already seeded and
 # reuses a healthy server; the audit file is always reset to an empty chain.
@@ -74,7 +74,7 @@ if [[ -n "$OPT_STORE_DOMAIN" ]]; then SHOPIFY_STORE_DOMAIN="$OPT_STORE_DOMAIN"; 
 
 if [[ "$STOP_SERVER" -ne 1 ]]; then
   [[ -n "${SHOPIFY_STORE_DOMAIN:-}" ]] || die "SHOPIFY_STORE_DOMAIN is not set (env, --store-domain, or .env)"
-  [[ "$SHOPIFY_STORE_DOMAIN" =~ ^[a-z0-9-]+\.myshopify\.com$ ]] \
+  [[ "$SHOPIFY_STORE_DOMAIN" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?\.myshopify\.com$ ]] \
     || die "SHOPIFY_STORE_DOMAIN must be a canonical *.myshopify.com hostname (got \"$SHOPIFY_STORE_DOMAIN\")"
   [[ -n "${SHOPIFY_ADMIN_TOKEN:-}" ]] || die "SHOPIFY_ADMIN_TOKEN is not set (env or .env)"
   export SHOPIFY_STORE_DOMAIN SHOPIFY_ADMIN_TOKEN
@@ -89,10 +89,15 @@ PORT="${SHOPIFY_APPROVAL_SERVER_PORT:-4319}"
 PIDFILE="${SHOPIFY_DEMO_PIDFILE:-/tmp/shopify-demo-server.pid}"
 SERVER_LOG="${SHOPIFY_DEMO_LOG:-/tmp/shopify-demo-server.log}"
 
-server_pid() { [[ -f "$PIDFILE" ]] && cat "$PIDFILE" || echo ""; }
+server_pid() { [[ -f "$PIDFILE" ]] && sed -n '1p' "$PIDFILE" || echo ""; }
+server_started_at() { [[ -f "$PIDFILE" ]] && sed -n '2p' "$PIDFILE" || echo ""; }
+# A stale PID reused by another process has a different start time, so the
+# recorded start time is a stable identity that only the same process instance
+# matches. Old single-line pidfiles have no start time and are treated as stale.
 server_proc_is_demo() {
-  local pid="$1"
-  [[ -n "$pid" ]] && [[ "$(ps -p "$pid" -o command= 2>/dev/null)" == *"dist/index.js"* ]]
+  local pid="$1" expected; expected="$(server_started_at)"
+  [[ -n "$pid" && -n "$expected" ]] \
+    && [[ "$expected" == "$(ps -p "$pid" -o lstart= 2>/dev/null)" ]]
 }
 server_alive() {
   local pid; pid="$(server_pid)"
@@ -112,9 +117,14 @@ stop_server() {
     kill "$pid" 2>/dev/null || true
     for _ in $(seq 1 20); do
       kill -0 "$pid" 2>/dev/null || break
+      # The pid must still be our process; if it was reused after the demo
+      # process exited, stop waiting and leave the new process alone.
+      server_proc_is_demo "$pid" || break
       sleep 0.5
     done
-    kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+    if kill -0 "$pid" 2>/dev/null && server_proc_is_demo "$pid"; then
+      kill -9 "$pid" 2>/dev/null || true
+    fi
   fi
   rm -f "$PIDFILE"
 }
@@ -214,7 +224,7 @@ else
     fi
     say "Starting server (node dist/index.js)"
     nohup node dist/index.js >"$SERVER_LOG" 2>&1 &
-    echo "$!" > "$PIDFILE"
+    printf '%s\n%s\n' "$!" "$(ps -p "$!" -o lstart= 2>/dev/null)" > "$PIDFILE"
     # disown so the server survives this script exiting
     disown "$!" 2>/dev/null || true
     for _ in $(seq 1 30); do
