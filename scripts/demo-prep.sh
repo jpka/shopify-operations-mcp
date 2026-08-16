@@ -11,12 +11,11 @@
 # Usage (from the repo root, via `npm run demo:prep`):
 #   bash scripts/demo-prep.sh [--force-reseed] [--skip-seed] [--skip-build]
 #                             [--no-server] [--baseline] [--stop-server]
-#                             [--store-domain <d>] [--admin-token <t>]
-#                             [--audit-path <p>]
+#                             [--store-domain <d>] [--audit-path <p>]
 #
 # Credentials come from SHOPIFY_STORE_DOMAIN + SHOPIFY_ADMIN_TOKEN (env or
-# flags), falling back to the gitignored .env file (which may use the legacy
-# SHOPIFY_SHOP_DOMAIN name). The token is never committed.
+# --store-domain), falling back to the gitignored .env file (which may use the
+# legacy SHOPIFY_SHOP_DOMAIN name). The token is never committed.
 #
 # Idempotent: a re-run skips the seed when the store is already seeded and
 # reuses a healthy server; the audit file is always reset to an empty chain.
@@ -38,7 +37,6 @@ NO_SERVER=0
 DO_BASELINE=0
 STOP_SERVER=0
 OPT_STORE_DOMAIN=""
-OPT_ADMIN_TOKEN=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -49,7 +47,6 @@ while [[ $# -gt 0 ]]; do
     --baseline) DO_BASELINE=1 ;;
     --stop-server) STOP_SERVER=1 ;;
     --store-domain) OPT_STORE_DOMAIN="${2:?--store-domain needs a value}"; shift ;;
-    --admin-token) OPT_ADMIN_TOKEN="${2:?--admin-token needs a value}"; shift ;;
     --audit-path) SHOPIFY_AUDIT_PATH="${2:?--audit-path needs a value}"; shift ;;
     -h|--help)
       sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -74,11 +71,14 @@ if [[ -z "${SHOPIFY_STORE_DOMAIN:-}" && -n "${SHOPIFY_SHOP_DOMAIN:-}" ]]; then
   SHOPIFY_STORE_DOMAIN="$SHOPIFY_SHOP_DOMAIN"
 fi
 if [[ -n "$OPT_STORE_DOMAIN" ]]; then SHOPIFY_STORE_DOMAIN="$OPT_STORE_DOMAIN"; fi
-if [[ -n "$OPT_ADMIN_TOKEN" ]]; then SHOPIFY_ADMIN_TOKEN="$OPT_ADMIN_TOKEN"; fi
 
-[[ -n "${SHOPIFY_STORE_DOMAIN:-}" ]] || die "SHOPIFY_STORE_DOMAIN is not set (env, --store-domain, or .env)"
-[[ -n "${SHOPIFY_ADMIN_TOKEN:-}" ]] || die "SHOPIFY_ADMIN_TOKEN is not set (env, --admin-token, or .env)"
-export SHOPIFY_STORE_DOMAIN SHOPIFY_ADMIN_TOKEN
+if [[ "$STOP_SERVER" -ne 1 ]]; then
+  [[ -n "${SHOPIFY_STORE_DOMAIN:-}" ]] || die "SHOPIFY_STORE_DOMAIN is not set (env, --store-domain, or .env)"
+  [[ "$SHOPIFY_STORE_DOMAIN" =~ ^[a-z0-9-]+\.myshopify\.com$ ]] \
+    || die "SHOPIFY_STORE_DOMAIN must be a canonical *.myshopify.com hostname (got \"$SHOPIFY_STORE_DOMAIN\")"
+  [[ -n "${SHOPIFY_ADMIN_TOKEN:-}" ]] || die "SHOPIFY_ADMIN_TOKEN is not set (env or .env)"
+  export SHOPIFY_STORE_DOMAIN SHOPIFY_ADMIN_TOKEN
+fi
 
 # Demo env (runbook 0.3): comfortable approval window, attributable caller,
 # fresh audit file per take.
@@ -90,15 +90,24 @@ PIDFILE="${SHOPIFY_DEMO_PIDFILE:-/tmp/shopify-demo-server.pid}"
 SERVER_LOG="${SHOPIFY_DEMO_LOG:-/tmp/shopify-demo-server.log}"
 
 server_pid() { [[ -f "$PIDFILE" ]] && cat "$PIDFILE" || echo ""; }
+server_proc_is_demo() {
+  local pid="$1"
+  [[ -n "$pid" ]] && [[ "$(ps -p "$pid" -o command= 2>/dev/null)" == *"dist/index.js"* ]]
+}
 server_alive() {
   local pid; pid="$(server_pid)"
-  [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+  [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && server_proc_is_demo "$pid"
 }
 approval_up() { curl -sf --max-time 2 "http://127.0.0.1:$PORT/" >/dev/null 2>&1; }
 
 stop_server() {
   local pid; pid="$(server_pid)"
-  if server_alive; then
+  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    if ! server_proc_is_demo "$pid"; then
+      warn "pid $pid in $PIDFILE is not the demo server; removing stale pidfile without signaling it"
+      rm -f "$PIDFILE"
+      return
+    fi
     say "Stopping demo server (pid $pid)"
     kill "$pid" 2>/dev/null || true
     for _ in $(seq 1 20); do

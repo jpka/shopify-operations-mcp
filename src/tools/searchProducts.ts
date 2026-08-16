@@ -60,6 +60,8 @@ export interface VariantRef {
   inventoryItemId: string;
   /** Current per-location inventory references. */
   inventoryLevels: InventoryLevelRef[];
+  /** False when the inventoryLevels array was truncated (more levels exist). */
+  inventoryLevelsComplete: boolean;
   flags: ProtectedFlags;
 }
 
@@ -69,6 +71,8 @@ export interface ProductRef {
   vendor: string | null;
   tags: string[];
   variants: VariantRef[];
+  /** False when the variants array was truncated (more variants exist). */
+  variantsComplete: boolean;
   flags: ProtectedFlags;
 }
 
@@ -92,7 +96,10 @@ interface RawVariantNode {
   price: string;
   inventoryItem: {
     id: string;
-    inventoryLevels: { edges: Array<{ node: RawInventoryLevelNode }> };
+    inventoryLevels: {
+      edges: Array<{ node: RawInventoryLevelNode }>;
+      pageInfo?: { hasNextPage: boolean } | null;
+    };
   };
 }
 
@@ -101,7 +108,10 @@ interface RawProductNode {
   title: string;
   vendor: string | null;
   tags: string[];
-  variants: { edges: Array<{ node: RawVariantNode }> };
+  variants: {
+    edges: Array<{ node: RawVariantNode }>;
+    pageInfo?: { hasNextPage: boolean } | null;
+  };
 }
 
 /**
@@ -142,9 +152,15 @@ const SEARCH_PRODUCTS_QUERY = /* GraphQL */ `
                         }
                       }
                     }
+                    pageInfo {
+                      hasNextPage
+                    }
                   }
                 }
               }
+            }
+            pageInfo {
+              hasNextPage
             }
           }
         }
@@ -192,6 +208,7 @@ function availableOf(
 }
 
 function toVariantRef(raw: RawVariantNode, flags: ProtectedFlags): VariantRef {
+  const inventoryLevelsComplete = !(raw.inventoryItem.inventoryLevels.pageInfo?.hasNextPage ?? false);
   return {
     id: raw.id,
     sku: raw.sku,
@@ -203,18 +220,21 @@ function toVariantRef(raw: RawVariantNode, flags: ProtectedFlags): VariantRef {
       locationId: node.location.id,
       locationName: node.location.name,
     })),
+    inventoryLevelsComplete,
     flags,
   };
 }
 
 function toProductRef(raw: RawProductNode, protectedTags: readonly string[]): ProductRef {
   const flags = protectedFlags(raw.tags, protectedTags);
+  const variantsComplete = !(raw.variants.pageInfo?.hasNextPage ?? false);
   return {
     id: raw.id,
     title: raw.title,
     vendor: raw.vendor,
     tags: raw.tags,
     variants: raw.variants.edges.map(({ node }) => toVariantRef(node, flags)),
+    variantsComplete,
     flags,
   };
 }

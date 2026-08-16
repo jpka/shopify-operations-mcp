@@ -59,6 +59,7 @@ interface RawVariant {
           location: { id: string; name: string };
         };
       }>;
+      pageInfo?: { hasNextPage: boolean } | null;
     };
   };
 }
@@ -68,7 +69,10 @@ interface RawProduct {
   title: string;
   vendor: string | null;
   tags: string[];
-  variants: { edges: Array<{ node: RawVariant }> };
+  variants: {
+    edges: Array<{ node: RawVariant }>;
+    pageInfo?: { hasNextPage: boolean } | null;
+  };
 }
 
 function rawVariant(
@@ -76,6 +80,7 @@ function rawVariant(
   sku: string,
   price: string,
   levels: Array<{ available: number; location: { id: string; name: string } }>,
+  opts: { inventoryLevelsPageInfo?: { hasNextPage: boolean } | null } = {},
 ): { node: RawVariant } {
   return {
     node: {
@@ -92,6 +97,9 @@ function rawVariant(
               location: level.location,
             },
           })),
+          ...(opts.inventoryLevelsPageInfo
+            ? { pageInfo: opts.inventoryLevelsPageInfo }
+            : {}),
         },
       },
     },
@@ -101,7 +109,12 @@ function rawVariant(
 function rawProduct(
   id: number,
   title: string,
-  opts: { vendor?: string | null; tags?: string[]; variants?: Array<{ node: RawVariant }> } = {},
+  opts: {
+    vendor?: string | null;
+    tags?: string[];
+    variants?: Array<{ node: RawVariant }>;
+    variantsPageInfo?: { hasNextPage: boolean } | null;
+  } = {},
 ): RawProduct {
   return {
     id: `gid://shopify/Product/${id}`,
@@ -110,6 +123,7 @@ function rawProduct(
     tags: opts.tags ?? [],
     variants: {
       edges: opts.variants ?? [rawVariant(id, `SKU-${id}`, "19.99", [])],
+      ...(opts.variantsPageInfo ? { pageInfo: opts.variantsPageInfo } : {}),
     },
   };
 }
@@ -231,9 +245,52 @@ describe("searchProducts (ticket #7)", () => {
         { id: "gid://shopify/InventoryLevel/11_0", available: 4, locationId: "gid://shopify/Location/1", locationName: "Main" },
         { id: "gid://shopify/InventoryLevel/11_1", available: 0, locationId: "gid://shopify/Location/2", locationName: "Annex" },
       ],
+      inventoryLevelsComplete: true,
       flags: { protected: false, protectedTags: [] },
     });
     expect(second!.inventoryLevels).toEqual([]);
+  });
+
+  it("flags variantsComplete false when a product's variants connection has more pages", async () => {
+    const product = rawProduct(1, "Tea", {
+      variants: [rawVariant(11, "T-L", "12.50", [])],
+      variantsPageInfo: { hasNextPage: true },
+    });
+    const { fetchImpl } = productPaginator([[product]]);
+    const client = buildClient(fetchImpl);
+
+    const result = await searchProducts(client, {}, appConfig());
+
+    expect(result.products[0]!.variantsComplete).toBe(false);
+    expect(result.products[0]!.variants[0]!.inventoryLevelsComplete).toBe(true);
+  });
+
+  it("flags inventoryLevelsComplete false when a variant's inventoryLevels connection has more pages", async () => {
+    const product = rawProduct(1, "Tea", {
+      variants: [
+        rawVariant(11, "T-L", "12.50", [
+          { available: 4, location: { id: "gid://shopify/Location/1", name: "Main" } },
+        ], { inventoryLevelsPageInfo: { hasNextPage: true } }),
+      ],
+    });
+    const { fetchImpl } = productPaginator([[product]]);
+    const client = buildClient(fetchImpl);
+
+    const result = await searchProducts(client, {}, appConfig());
+
+    expect(result.products[0]!.variants[0]!.inventoryLevelsComplete).toBe(false);
+    expect(result.products[0]!.variantsComplete).toBe(true);
+  });
+
+  it("defaults variantsComplete and inventoryLevelsComplete to true when nested pageInfo is absent", async () => {
+    const product = rawProduct(1, "Tea");
+    const { fetchImpl } = productPaginator([[product]]);
+    const client = buildClient(fetchImpl);
+
+    const result = await searchProducts(client, {}, appConfig());
+
+    expect(result.products[0]!.variantsComplete).toBe(true);
+    expect(result.products[0]!.variants[0]!.inventoryLevelsComplete).toBe(true);
   });
 
   it("annotates products and variants carrying a protected tag without filtering them out", async () => {

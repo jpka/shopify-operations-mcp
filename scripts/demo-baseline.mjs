@@ -88,6 +88,9 @@ try {
   if (data.count !== EXPECTED.products) {
     failures.push(`count=${data.count} expected ${EXPECTED.products}`);
   }
+  if (data.first !== 50) {
+    failures.push(`first=${data.first} expected 50`);
+  }
   if (variants !== EXPECTED.variants) {
     failures.push(`variants=${variants} expected ${EXPECTED.variants}`);
   }
