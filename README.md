@@ -85,6 +85,8 @@ npm run build
 
 Set the required environment variable and point Claude Desktop at the server (see Configuration below). `node dist/index.js` starts the [localhost approval UI](#localhost-approval-ui) alongside the MCP stdio server.
 
+**Demo:** the step-by-step walkthrough script (store-wide reprice refused → approval-gated reprice → one-call rollback → hash-chained audit) is in [docs/demo-runbook.md](docs/demo-runbook.md).
+
 ## Configuration
 
 Configuration file (default `config.json` in the working directory, or path via `SHOPIFY_CONFIG`):
