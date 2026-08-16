@@ -2,7 +2,7 @@
 /**
  * Deterministic dev-store seeder.
  *
- *   npm run seed -- [--seed 42] [--dry-run] [--order-delay-ms 1200]
+ *   npm run seed -- [--seed 42] [--dry-run] [--order-delay-ms 12000]
  *
  * Generates a realistic store from a seeded PRNG (see seed-data.ts) and
  * writes it through the Admin API via AdminClient: ~300 products with 1-4
@@ -23,10 +23,12 @@
  *
  * Product creation follows the current product model: `productCreate` makes
  * the initial "Default Title" variant (there is no `variants` input on
- * ProductCreateInput), `productVariantsBulkCreate` adds the rest under the
- * "Title" option, and `productVariantsBulkUpdate` pins sku/price/inventory
- * tracking on the initial variant. Inventory items are auto-created and
- * stock is set with `inventorySetQuantities` per location.
+ * ProductCreateInput); multi-variant products then go through
+ * `productVariantsBulkCreate`, which redefines the option/variant set from
+ * the plan's `optionValues` under the "Title" option, and single-variant
+ * products through `productVariantsBulkUpdate` on the default variant — both
+ * pin sku/price/inventory tracking in the same call. Inventory items are
+ * auto-created and stock is set with `inventorySetQuantities` per location.
  */
 import { AdminClient, chunk, paginateConnection } from "../src/graphql/adminClient.ts";
 import { DEFAULT_PLANS_CONFIG, loadConfig } from "../src/config.ts";
@@ -149,7 +151,7 @@ const TAG_SEARCH_QUERY = `
 
 const PRODUCT_DELETE_MUTATION = `
   mutation SeedProductDelete($productId: ID!) {
-    productDelete(productId: $productId) {
+    productDelete(input: { id: $productId }) {
       deletedProductId
       userErrors { field message }
     }
@@ -188,7 +190,7 @@ interface ProductCreateResponse {
   productCreate: {
     product: {
       id: string;
-      variants: { nodes: Array<{ id: string; sku: string; inventoryItem: { id: string } }> };
+      variants: { nodes: Array<{ id: string }> };
     } | null;
     userErrors: UserError[];
   };
@@ -199,13 +201,7 @@ const PRODUCT_CREATE_MUTATION = `
     productCreate(product: $product) {
       product {
         id
-        variants(first: 10) {
-          nodes {
-            id
-            sku
-            inventoryItem { id }
-          }
-        }
+        variants(first: 10) { nodes { id } }
       }
       userErrors { field message }
     }
@@ -220,7 +216,7 @@ interface BulkVariantsResponse {
 const VARIANTS_BULK_CREATE_MUTATION = `
   mutation SeedVariantsBulkCreate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
     productVariantsBulkCreate(productId: $productId, variants: $variants) {
-      productVariants { id sku inventoryItem { id } }
+      productVariants { id sku price inventoryItem { id } }
       userErrors { field message }
     }
   }
@@ -240,8 +236,8 @@ interface InventorySetResponse {
 }
 
 const INVENTORY_SET_QUANTITIES_MUTATION = `
-  mutation SeedInventorySetQuantities($input: InventorySetQuantitiesInput!) {
-    inventorySetQuantities(input: $input) {
+  mutation SeedInventorySetQuantities($input: InventorySetQuantitiesInput!, $key: String!) {
+    inventorySetQuantities(input: $input) @idempotent(key: $key) {
       userErrors { field message }
     }
   }
@@ -252,8 +248,8 @@ interface CustomerCreateResponse {
 }
 
 const CUSTOMER_CREATE_MUTATION = `
-  mutation SeedCustomerCreate($customer: CustomerCreateInput!) {
-    customerCreate(customer: $customer) {
+  mutation SeedCustomerCreate($customer: CustomerInput!) {
+    customerCreate(input: $customer) {
       customer { id }
       userErrors { field message }
     }
@@ -353,24 +349,29 @@ function productCreateInput(product: SeedProduct): Record<string, unknown> {
   };
 }
 
-/** The variant input shared by bulk create (extra variants) and bulk update. */
+/**
+ * The variant input shared by bulk create and bulk update. The current
+ * product model moved `sku` and inventory tracking off the variant into
+ * `inventoryItem`.
+ */
 function variantBulkInput(variant: SeedVariant): Record<string, unknown> {
   return {
     optionValues: [{ name: variant.title, optionName: "Title" }],
-    sku: variant.sku,
     price: formatPrice(variant.priceCents),
-    inventoryManagement: "SHOPIFY",
+    inventoryItem: { sku: variant.sku, tracked: true },
   };
 }
 
 /**
  * Creates every product and variant. `productCreate` yields the initial
  * "Default Title" variant (ProductCreateInput has no `variants` field in the
- * current product model); additional variants go through
- * `productVariantsBulkCreate`, and `productVariantsBulkUpdate` pins
- * sku/price/inventory tracking on the initial variant so
- * `inventorySetQuantities` can manage its stock. Returns the Shopify
- * variant/inventory-item GIDs keyed by the plan's global variant index.
+ * current product model). For products with extra variants,
+ * `productVariantsBulkCreate` redefines the option/variant set from the
+ * plan's `optionValues` and pins sku/price/inventory tracking on every
+ * variant in the same call. For single-variant products the default variant
+ * already exists, so `productVariantsBulkUpdate` pins sku/price/inventory
+ * tracking on it directly. Returns the Shopify variant/inventory-item GIDs
+ * keyed by the plan's global variant index.
  */
 async function createProducts(
   client: AdminClient,
@@ -390,66 +391,59 @@ async function createProducts(
     if (!createdProduct) {
       throw new Error(`productCreate ${product.title} returned no product`);
     }
-    const initialNode = createdProduct.variants.nodes[0];
-    if (!initialNode) {
-      throw new Error(`productCreate ${product.title} returned no initial variant`);
-    }
 
-    const extraVariants = product.variants.slice(1);
-    if (extraVariants.length > 0) {
+    let created: BulkVariantsResponse["productVariants"];
+    if (product.variants.length > 1) {
       const bulkData = await client.graphql<{
         productVariantsBulkCreate: BulkVariantsResponse;
       }>({
         query: VARIANTS_BULK_CREATE_MUTATION,
         variables: {
           productId: createdProduct.id,
-          variants: extraVariants.map(variantBulkInput),
+          variants: product.variants.map(variantBulkInput),
         },
-        cost: extraVariants.length,
+        cost: product.variants.length,
       });
       assertNoUserErrors(
         bulkData.productVariantsBulkCreate.userErrors,
         `productVariantsBulkCreate ${product.title}`,
       );
-      const created = bulkData.productVariantsBulkCreate.productVariants;
-      if (created.length !== extraVariants.length) {
-        throw new Error(
-          `productVariantsBulkCreate ${product.title}: expected ${extraVariants.length} variants, got ${created.length}`,
-        );
+      created = bulkData.productVariantsBulkCreate.productVariants;
+    } else {
+      const initialNode = createdProduct.variants.nodes[0];
+      if (!initialNode) {
+        throw new Error(`productCreate ${product.title} returned no initial variant`);
       }
-      for (let k = 0; k < extraVariants.length; k++) {
-        const variant = extraVariants[k]!;
-        const node = created[k]!;
-        byGlobalIndex.set(variant.globalIndex, {
-          variantGid: node.id,
-          inventoryItemGid: node.inventoryItem.id,
-        });
-      }
+      const updateData = await client.graphql<{
+        productVariantsBulkUpdate: BulkVariantsResponse;
+      }>({
+        query: VARIANTS_BULK_UPDATE_MUTATION,
+        variables: {
+          productId: createdProduct.id,
+          variants: [{ id: initialNode.id, ...variantBulkInput(product.variants[0]!) }],
+        },
+        cost: 1,
+      });
+      assertNoUserErrors(
+        updateData.productVariantsBulkUpdate.userErrors,
+        `productVariantsBulkUpdate ${product.title}`,
+      );
+      created = updateData.productVariantsBulkUpdate.productVariants;
     }
 
-    const initial = product.variants[0]!;
-    const updateData = await client.graphql<{
-      productVariantsBulkUpdate: BulkVariantsResponse;
-    }>({
-      query: VARIANTS_BULK_UPDATE_MUTATION,
-      variables: {
-        productId: createdProduct.id,
-        variants: [{ id: initialNode.id, ...variantBulkInput(initial) }],
-      },
-      cost: 1,
-    });
-    assertNoUserErrors(
-      updateData.productVariantsBulkUpdate.userErrors,
-      `productVariantsBulkUpdate ${product.title}`,
-    );
-    const updatedNode = updateData.productVariantsBulkUpdate.productVariants[0];
-    if (!updatedNode) {
-      throw new Error(`productVariantsBulkUpdate ${product.title} returned no variant`);
+    if (created.length !== product.variants.length) {
+      throw new Error(
+        `product variants for ${product.title}: expected ${product.variants.length}, got ${created.length}`,
+      );
     }
-    byGlobalIndex.set(initial.globalIndex, {
-      variantGid: updatedNode.id,
-      inventoryItemGid: updatedNode.inventoryItem.id,
-    });
+    for (let k = 0; k < product.variants.length; k++) {
+      const variant = product.variants[k]!;
+      const node = created[k]!;
+      byGlobalIndex.set(variant.globalIndex, {
+        variantGid: node.id,
+        inventoryItemGid: node.inventoryItem.id,
+      });
+    }
 
     if ((i + 1) % 50 === 0) {
       process.stderr.write(`  created ${i + 1}/${plan.products.length} products\n`);
@@ -469,6 +463,7 @@ async function setInventory(
   byGlobalIndex: Map<number, CreatedVariantRef>,
   plan: SeedPlan,
 ): Promise<void> {
+  const runKey = `${plan.seed}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   const entries: Array<{ inventoryItemGid: string; stock: number[] }> = [];
   for (const product of plan.products) {
     for (const variant of product.variants) {
@@ -486,8 +481,11 @@ async function setInventory(
       inventoryItemId: entry.inventoryItemGid,
       locationId: locationGid,
       quantity: entry.stock[locationIndex] ?? 0,
+      // The API requires the expected current quantity; every inventory item
+      // here was just created by this seed run, so it starts at zero.
+      changeFromQuantity: 0,
     }));
-    for (const batch of chunk(quantities, 250)) {
+    for (const [batchIndex, batch] of chunk(quantities, 250).entries()) {
       const data = await client.graphql<InventorySetResponse>({
         query: INVENTORY_SET_QUANTITIES_MUTATION,
         variables: {
@@ -497,6 +495,10 @@ async function setInventory(
             referenceDocumentUri: `gid://shopify-operations-mcp/Seed/seed-${plan.seed}`,
             quantities: batch,
           },
+          // Unique per run: a re-seed recreates every inventory item, so a
+          // key reused from a previous run would collide ("different
+          // parameters"). Idempotency still dedupes retries within this run.
+          key: `${runKey}-inventory-loc-${locationIndex}-batch-${batchIndex}`,
         },
         cost: batch.length,
       });
@@ -571,13 +573,18 @@ async function createOrders(
       }),
       customer: { toAssociate: { id: customerGid } },
       financialStatus: order.financialStatus,
-      fulfillmentStatus: order.fulfillmentStatus,
       tags: order.tags,
       test: true,
     };
+    // OrderCreateFulfillmentStatus has no UNFULFILLED value: an order is
+    // unfulfilled by default, so only fulfilled orders set the field.
+    if (order.fulfillmentStatus === "FULFILLED") {
+      input.fulfillmentStatus = "FULFILLED";
+    }
     if (order.discountAmountCents !== null) {
       input.discountCode = {
         itemFixedDiscountCode: {
+          code: `seed-${order.id}`,
           amountSet: {
             shopMoney: {
               amount: formatPrice(order.discountAmountCents),
@@ -590,7 +597,7 @@ async function createOrders(
 
     const data = await client.graphql<OrderCreateResponse>({
       query: ORDER_CREATE_MUTATION,
-      variables: { order: input, options: { inventoryBehaviour: "bypass" } },
+      variables: { order: input, options: { inventoryBehaviour: "BYPASS" } },
       cost: 10,
     });
     assertNoUserErrors(data.orderCreate.userErrors, `orderCreate ${order.id}`);
