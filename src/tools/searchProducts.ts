@@ -6,6 +6,14 @@ import { paginateConnection } from "../graphql/adminClient.js";
  * the client's 250 so a search feels snappier and cost stays low. */
 export const DEFAULT_SEARCH_PAGE_SIZE = 50;
 
+/**
+ * Upper bound for the cursor-walk page size. The nested
+ * `variants(first: ...)` × `inventoryLevels(first: ...)` selections multiply
+ * the Admin API's per-query cost, so a page larger than this would exceed the
+ * 1000-credit single-query limit even with the reduced nested caps.
+ */
+export const MAX_SEARCH_PAGE_SIZE = 50;
+
 export interface SearchProductsArgs {
   /** Matches products whose title contains the term (Shopify fuzzy search). */
   title?: string;
@@ -73,7 +81,8 @@ export interface SearchProductsResult {
 
 interface RawInventoryLevelNode {
   id: string;
-  available: number;
+  /** Per-name inventory quantities; "available" holds the sellable count. */
+  quantities: Array<{ name: string; quantity: number }>;
   location: { id: string; name: string };
 }
 
@@ -111,7 +120,7 @@ const SEARCH_PRODUCTS_QUERY = /* GraphQL */ `
           title
           vendor
           tags
-          variants(first: 250) {
+          variants(first: 50) {
             edges {
               node {
                 id
@@ -119,11 +128,14 @@ const SEARCH_PRODUCTS_QUERY = /* GraphQL */ `
                 price
                 inventoryItem {
                   id
-                  inventoryLevels(first: 250) {
+                  inventoryLevels(first: 10) {
                     edges {
                       node {
                         id
-                        available
+                        quantities(names: ["available"]) {
+                          name
+                          quantity
+                        }
                         location {
                           id
                           name
@@ -168,6 +180,17 @@ function protectedFlags(
   return { protected: matched.length > 0, protectedTags: matched };
 }
 
+/**
+ * Extracts the sellable ("available") quantity from an inventory level's
+ * per-name quantities. Since the API removed the flat `available` field on
+ * InventoryLevel, the query selects `quantities { name quantity }`.
+ */
+function availableOf(
+  quantities: Array<{ name: string; quantity: number }>,
+): number {
+  return quantities.find((q) => q.name === "available")?.quantity ?? 0;
+}
+
 function toVariantRef(raw: RawVariantNode, flags: ProtectedFlags): VariantRef {
   return {
     id: raw.id,
@@ -176,7 +199,7 @@ function toVariantRef(raw: RawVariantNode, flags: ProtectedFlags): VariantRef {
     inventoryItemId: raw.inventoryItem.id,
     inventoryLevels: raw.inventoryItem.inventoryLevels.edges.map(({ node }) => ({
       id: node.id,
-      available: node.available,
+      available: availableOf(node.quantities),
       locationId: node.location.id,
       locationName: node.location.name,
     })),
@@ -209,7 +232,10 @@ export async function searchProducts(
   args: SearchProductsArgs,
   config: AppConfig,
 ): Promise<SearchProductsResult> {
-  const first = args.first ?? DEFAULT_SEARCH_PAGE_SIZE;
+  const first = Math.min(
+    args.first ?? DEFAULT_SEARCH_PAGE_SIZE,
+    MAX_SEARCH_PAGE_SIZE,
+  );
   const searchQuery = buildProductSearchQuery(args);
   const rawProducts = await paginateConnection<RawProductNode>(client, {
     query: SEARCH_PRODUCTS_QUERY,

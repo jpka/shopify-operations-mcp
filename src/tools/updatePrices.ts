@@ -159,15 +159,18 @@ async function fetchVariantsByIds(
 ): Promise<Map<string, RawVariantNode>> {
   if (variantIds.length === 0) return new Map();
 
-  const data = await client.graphql<{ nodes: RawVariantNode[] }>({
-    query: GET_VARIANTS_QUERY,
-    variables: { ids: variantIds },
-    cost: variantIds.length,
-  });
-
+  // `nodes(ids:)` accepts at most 250 ids per request, so chunk larger sets
+  // (e.g. Beat 1's full 768-variant store reprice) and merge the results.
   const map = new Map<string, RawVariantNode>();
-  for (const node of data.nodes) {
-    if (node) map.set(node.id, node);
+  for (const batch of chunk(variantIds, 250)) {
+    const data = await client.graphql<{ nodes: RawVariantNode[] }>({
+      query: GET_VARIANTS_QUERY,
+      variables: { ids: batch },
+      cost: batch.length,
+    });
+    for (const node of data.nodes) {
+      if (node) map.set(node.id, node);
+    }
   }
   return map;
 }

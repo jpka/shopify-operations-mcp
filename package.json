@@ -40,6 +40,8 @@
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "verify-audit": "tsx scripts/verify-audit.ts",
     "seed": "tsx scripts/seed-store.ts",
+    "demo:prep": "bash scripts/demo-prep.sh",
+    "demo:baseline": "node scripts/demo-baseline.mjs",
     "lint": "tsc --noEmit",
     "prepare": "npm run build"
   },

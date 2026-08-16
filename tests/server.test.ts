@@ -216,14 +216,14 @@ const shopifyFetch: FetchLike = async (_input, init) => {
                           inventoryLevels: {
                             edges: [
                               {
-                                node: {
-                                  id: "gid://shopify/InventoryLevel/1_0",
-                                  available: 4,
-                                  location: {
-                                    id: "gid://shopify/Location/1",
-                                    name: "Main",
+node: {
+                                    id: "gid://shopify/InventoryLevel/1_0",
+                                    quantities: [{ name: "available", quantity: 4 }],
+                                    location: {
+                                      id: "gid://shopify/Location/1",
+                                      name: "Main",
+                                    },
                                   },
-                                },
                               },
                             ],
                           },

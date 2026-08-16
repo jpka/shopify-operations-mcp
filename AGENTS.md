@@ -9,6 +9,7 @@ shopify-operations-mcp: a safe-write MCP server for Shopify operations, built on
 - Put `Closes #n` in the PR body so the ticket closes on merge; then post a resolution comment summarizing what was delivered and verified.
 - Triage labels: `needs-triage` (maintainer must evaluate), `needs-info` (waiting on reporter), `ready-for-agent` (fully specified, ready for an AFK agent), `ready-for-human` (requires human implementation), `wayfinder:map` (parent tracking issue). Drop `needs-triage` when a ticket is ready.
 - Verify before opening a PR: `npm run lint` (tsc --noEmit) and `npm test` (vitest) locally — CI runs the same on Node 24.
+- **Delegate when it makes sense:** break work into independent parallel tracks and hand each to a subagent (e.g. static lint/test/grep on one side, a live-store verification on another). Delegate when the tracks don't touch the same files or state; keep edits that depend on one another in the same hand.
 - `safe-write-mcp-core` is a `file:` dependency until jpka/safe-write-mcp-core#7 publishes to npm; the registry dependency replaces it afterward.
 - Architectural decisions are recorded in `DECISIONS.md` (newest first), in the style of sw-postgres-mcp.
 

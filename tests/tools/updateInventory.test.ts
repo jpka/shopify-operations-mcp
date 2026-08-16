@@ -53,7 +53,7 @@ function jsonResponse(payload: unknown, status = 200): Response {
 
 interface RawInventoryLevelNode {
   id: string;
-  available: number;
+  quantities: Array<{ name: string; quantity: number }>;
   location: { id: string };
 }
 
@@ -85,7 +85,7 @@ function rawInventoryItem(
         {
           node: {
             id: `gid://shopify/InventoryLevel/${id}`,
-            available,
+            quantities: [{ name: "available", quantity: available }],
             location: { id: locationId },
           },
         },
@@ -134,7 +134,7 @@ function buildInventoryFixture(
           inventorySetQuantities: {
             inventoryLevels: input.quantities.map((q, i) => ({
               id: `gid://shopify/InventoryLevel/${i}`,
-              available: q.quantity,
+              quantities: [{ name: "available", quantity: q.quantity }],
               location: { id: locationId },
             })),
             userErrors: [],
@@ -511,7 +511,9 @@ describe("update_inventory two-phase safety matrix (ticket #11)", () => {
             inventorySetQuantities: {
               inventoryLevels: (qty ?? []).map((q, i) => ({
                 id: `gid://shopify/InventoryLevel/${i}`,
-                available: q.inventoryItemId === "gid://shopify/InventoryItem/1" ? 99 : 0,
+                quantities: [
+                  { name: "available", quantity: q.inventoryItemId === "gid://shopify/InventoryItem/1" ? 99 : 0 },
+                ],
                 location: { id: fixture.locationId },
               })),
               userErrors: [],
