@@ -436,13 +436,28 @@ async function createProducts(
         `product variants for ${product.title}: expected ${product.variants.length}, got ${created.length}`,
       );
     }
-    for (let k = 0; k < product.variants.length; k++) {
-      const variant = product.variants[k]!;
-      const node = created[k]!;
+    const bySku = new Map(product.variants.map((v) => [v.sku, v]));
+    const seenSku = new Set<string>();
+    for (const node of created) {
+      const variant = bySku.get(node.sku);
+      if (!variant) {
+        throw new Error(`product ${product.title}: unexpected variant sku ${node.sku}`);
+      }
+      if (seenSku.has(node.sku)) {
+        throw new Error(`product ${product.title}: duplicate variant sku ${node.sku}`);
+      }
+      seenSku.add(node.sku);
       byGlobalIndex.set(variant.globalIndex, {
         variantGid: node.id,
         inventoryItemGid: node.inventoryItem.id,
       });
+    }
+    if (seenSku.size !== product.variants.length) {
+      const missing = product.variants
+        .filter((v) => !seenSku.has(v.sku))
+        .map((v) => v.sku)
+        .join(", ");
+      throw new Error(`product ${product.title}: missing variant skus ${missing}`);
     }
 
     if ((i + 1) % 50 === 0) {
