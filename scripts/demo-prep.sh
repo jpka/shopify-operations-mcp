@@ -164,7 +164,7 @@ if [[ "$SKIP_SEED" -eq 0 ]]; then
 
   if [[ "$FORCE_RESEED" -eq 1 ]]; then
     say "Seeding the store (--force-reseed)"
-    npm run seed -- --seed 42 --order-delay-ms 1200
+    npm run seed -- --seed 42 --order-delay-ms 12000
   else
     say "Checking whether the store is already seeded"
     seeded="$(node --input-type=module -e '
@@ -187,8 +187,8 @@ if [[ "$SKIP_SEED" -eq 0 ]]; then
     if [[ "$seeded" -ge 250 ]]; then
       ok "store already seeded (300 products expected) — skipping the ~24 min seed; use --force-reseed to regenerate"
     else
-      say "Seeding the store (this takes ~24 min with --order-delay-ms 1200)"
-      npm run seed -- --seed 42 --order-delay-ms 1200
+      say "Seeding the store (this takes ~24 min with --order-delay-ms 12000)"
+      npm run seed -- --seed 42 --order-delay-ms 12000
     fi
   fi
 else
