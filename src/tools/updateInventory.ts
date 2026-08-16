@@ -75,7 +75,8 @@ export interface InventoryManifestItem
 
 interface RawInventoryLevelNode {
   id: string;
-  available: number;
+  /** Per-name inventory quantities; "available" holds the sellable count. */
+  quantities: Array<{ name: string; quantity: number }>;
   location: { id: string };
 }
 
@@ -111,7 +112,10 @@ const GET_INVENTORY_ITEMS_QUERY = /* GraphQL */ `
           edges {
             node {
               id
-              available
+              quantities(names: ["available"]) {
+                name
+                quantity
+              }
               location {
                 id
               }
@@ -128,7 +132,10 @@ const INVENTORY_SET_QUANTITIES_MUTATION = /* GraphQL */ `
     inventorySetQuantities(input: $input) {
       inventoryLevels {
         id
-        available
+        quantities(names: ["available"]) {
+          name
+          quantity
+        }
         location {
           id
         }
@@ -140,6 +147,17 @@ const INVENTORY_SET_QUANTITIES_MUTATION = /* GraphQL */ `
     }
   }
 `;
+
+/**
+ * Extracts the sellable ("available") quantity from an inventory level's
+ * per-name quantities. Since the API removed the flat `available` field on
+ * InventoryLevel, the queries select `quantities { name quantity }`.
+ */
+function availableOf(
+  quantities: Array<{ name: string; quantity: number }>,
+): number {
+  return quantities.find((q) => q.name === "available")?.quantity ?? 0;
+}
 
 /**
  * Fetches inventory item records including product tags for protected-tag
@@ -174,7 +192,7 @@ async function fetchInventoryItems(
         levels.push({
           inventoryItemId: node.id,
           locationId: edge.node.location.id,
-          available: edge.node.available,
+          available: availableOf(edge.node.quantities),
         });
       }
     }
@@ -342,7 +360,7 @@ export class InventoryExecutor implements Executor<InventoryManifestItem, void> 
       try {
         const data = await this.client.graphql<{
           inventorySetQuantities: {
-            inventoryLevels: Array<{ id: string; available: number }>;
+            inventoryLevels: Array<{ id: string; quantities: Array<{ name: string; quantity: number }> }>;
             userErrors: Array<{ field: string[]; message: string }>;
           };
         }>({

@@ -55,7 +55,7 @@ interface RawVariant {
       edges: Array<{
         node: {
           id: string;
-          available: number;
+          quantities: Array<{ name: string; quantity: number }>;
           location: { id: string; name: string };
         };
       }>;
@@ -88,7 +88,7 @@ function rawVariant(
           edges: levels.map((level, i) => ({
             node: {
               id: `gid://shopify/InventoryLevel/${id}_${i}`,
-              available: level.available,
+              quantities: [{ name: "available", quantity: level.available }],
               location: level.location,
             },
           })),
