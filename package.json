@@ -1,6 +1,6 @@
 {
   "name": "shopify-operations-mcp",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Safe-write Shopify operations MCP server: plan-before-execute writes with out-of-band approval and audit",
   "mcpName": "io.github.jpka/shopify-operations-mcp",
   "type": "module",
