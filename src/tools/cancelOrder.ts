@@ -370,6 +370,9 @@ export async function executeCancelOrder(
     // Unreachable in-process: nothing between beginExecute and
     // confirmExecuted settles this token. Emit before throwing so an
     // execution that changed the store is never invisible in the audit trail.
+    // Status is deliberately "executed", not "failed": the ledger ran, so the
+    // store changed; the CONFIRM_FAILED detail flags that the token itself
+    // was never marked used.
     emitExecuteAudit(
       audit,
       startedAt,

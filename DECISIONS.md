@@ -19,7 +19,8 @@ does the migration go — minimal shims, or the core's recommended paths?
 sibling-checkout steps and `npm ci` pulls from the registry. (b)
 `PlanManager.executePlan` **and** `executeCancelOrder` migrate from the
 legacy one-step `consume()` to the core's two-step handoff: re-read current
-state (a no-op read for cancel, whose plan carries no dataDigest), then
+state for the reversible tools (no re-read for cancel, whose plan carries no
+dataDigest worth checking), then
 `beginExecute`, per-item ledger, `confirmExecuted`. For the reversible tools
 the migration is forced — `consume()` without a current digest now fails
 closed. For `cancel_order` it is chosen: the legacy path still works (null

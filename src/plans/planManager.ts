@@ -272,6 +272,9 @@ export class PlanManager<
       // effects, not plan transitions). Emit before throwing so an execution
       // whose mutations already applied is never invisible in this server's
       // own audit trail — the core error alone would leave no host row.
+      // Status is deliberately "executed", not "failed": the ledger ran, so
+      // the store changed; the CONFIRM_FAILED detail flags that the token
+      // itself was never marked used.
       this.emit(
         startedAt,
         planToken,
