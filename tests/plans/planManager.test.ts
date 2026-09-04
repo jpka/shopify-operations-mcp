@@ -3,7 +3,7 @@ import type { AuditEvent, AuditSink } from "safe-write-mcp-core";
 import { describe, expect, it, vi } from "vitest";
 import { ExecutionError } from "../../src/plans/errors.ts";
 import { PlanManager } from "../../src/plans/planManager.ts";
-import type { Manifest } from "../../src/plans/manifest.ts";
+import type { Manifest, ManifestItem } from "../../src/plans/manifest.ts";
 import { SnapshotStore } from "../../src/plans/snapshotStore.ts";
 import {
   ToyPriceExecutor,
@@ -250,5 +250,115 @@ describe("PlanManager two-phase framework (ticket #9)", () => {
     expect((err as ExecutionError).code).toBe("HARD_MAX_ITEMS_EXCEEDED");
     expect(audit.events.find((e) => e.status === "refused")).toBeDefined();
     expect(planStore.listPending()).toEqual([]);
+  });
+
+  it("passes the preview digest through for pure-create manifests (before === null)", async () => {
+    // A create has no prior state to compare: the state reader's junk must
+    // never trip the drift check. Shape mirrors the create_discount path.
+    const planStore = new PlanStore<Manifest<ManifestItem<unknown, unknown>>>({
+      planTtlMs: 60_000,
+    });
+    const executedRefs: string[] = [];
+    const manager = new PlanManager<ManifestItem<unknown, unknown>, unknown, void>({
+      store: planStore,
+      executor: {
+        execute: async (item) => {
+          executedRefs.push(item.ref);
+          return { ref: item.ref, ok: true };
+        },
+      },
+      stateReader: {
+        readCurrent: async (refs: readonly string[]) =>
+          Object.fromEntries(refs.map((ref) => [ref, { already: "created" }])),
+      },
+      snapshotStore: new SnapshotStore<unknown>(60_000),
+      callerId: "tester",
+    });
+    const manifest: Manifest<ManifestItem<unknown, unknown>> = {
+      items: [{ ref: "new-1", before: null, after: { id: "new-1" } }],
+      digest: "digest",
+      beforeDigest: "before",
+    };
+
+    const preview = await manager.preview(
+      { build: () => Promise.resolve(manifest) },
+      { tool: TOOL },
+    );
+    const result = await manager.executePlan(preview.planToken, manifest);
+    expect(result.status).toBe("executed");
+    expect(result.succeededCount).toBe(1);
+    expect(executedRefs).toEqual(["new-1"]);
+  });
+
+  it("a drift-refused token stays valid: re-executing once the world matches the preview succeeds", async () => {
+    const store = seed();
+    const { manager } = makeManager(store);
+
+    const preview = await manager.preview(
+      new ToyPriceManifestBuilder(store, [{ id: "a", newPrice: 12 }]),
+      { tool: TOOL },
+    );
+
+    const productA = store.get("a")!;
+    store.set({ ...productA, price: 11 });
+    const refused = await errorOf(manager.executePlan(preview.planToken, preview.manifest));
+    expect((refused as ExecutionError).code).toBe("STATE_CHANGED");
+
+    // The refusal never began the token, so once the drift is gone the same
+    // token executes — the old one-step consume burned it instead.
+    store.set({ ...productA, price: 10 });
+    const result = await manager.executePlan(preview.planToken, preview.manifest);
+    expect(result.status).toBe("executed");
+    expect(store.get("a")!.price).toBe(12);
+  });
+
+  it("a state-reader failure fails closed before any gate runs, with no execution", async () => {
+    const store = seed();
+    const planStore = new PlanStore<Manifest<PriceManifestItem>>({ planTtlMs: 60_000 });
+    const audit = new MemorySink();
+    const readError = new Error("shopify read failed");
+    const manager = new PlanManager<PriceManifestItem, ToyProduct, void>({
+      store: planStore,
+      executor: new ToyPriceExecutor(store),
+      stateReader: {
+        readCurrent: async (_refs: readonly string[]): Promise<Readonly<Record<string, ToyProduct>>> => {
+          throw readError;
+        },
+      },
+      audit,
+      callerId: "tester",
+    });
+
+    const preview = await manager.preview(
+      new ToyPriceManifestBuilder(store, [{ id: "a", newPrice: 12 }]),
+      { tool: TOOL },
+    );
+    const err = await errorOf(manager.executePlan(preview.planToken, preview.manifest));
+    expect(err).toBe(readError);
+    expect(store.get("a")!.price).toBe(10);
+    expect(audit.events).toEqual([]);
+  });
+
+  it("a fully-failed ledger still confirms the token: retry is PLAN_USED, never a silent retry", async () => {
+    const store = seed();
+    const executor = new ToyPriceExecutor(store, ["a"]);
+    const { manager } = makeManager(store, executor);
+
+    const preview = await manager.preview(
+      new ToyPriceManifestBuilder(store, [{ id: "a", newPrice: 12 }]),
+      { tool: TOOL },
+    );
+
+    const result = await manager.executePlan(preview.planToken, preview.manifest);
+    expect(result.status).toBe("executed");
+    expect(result.succeededCount).toBe(0);
+    expect(result.failedCount).toBe(1);
+    expect(store.get("a")!.price).toBe(10);
+
+    // The completed ledger was confirmed (single-use preserved): retrying
+    // would double-apply, so the token is burned — re-preview instead.
+    const second = await errorOf(manager.executePlan(preview.planToken, preview.manifest));
+    expect(second).toBeInstanceOf(PlanError);
+    expect((second as PlanError).code).toBe("PLAN_USED");
   });
 });

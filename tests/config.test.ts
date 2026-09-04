@@ -22,6 +22,8 @@ const SHOPIFY_ENV_KEYS = [
   "SHOPIFY_ROLLBACK_TTL_MS",
   "SHOPIFY_APPROVAL_SERVER_ENABLED",
   "SHOPIFY_APPROVAL_SERVER_PORT",
+  "SHOPIFY_APPROVAL_SERVER_REQUIRE_AUTH",
+  "SHOPIFY_APPROVAL_SERVER_AUTH_TOKEN",
   "SHOPIFY_PROTECTED_TAGS",
   "SHOPIFY_CALLER_ID",
   "SHOPIFY_CONFIG",
@@ -145,7 +147,7 @@ describe("config loader (ticket #4)", () => {
       maxPriceChangePct: 15,
       rollbackTtlMs: 3_600_000,
     });
-    expect(config.approvalServer).toEqual({ enabled: false, port: 9999 });
+    expect(config.approvalServer).toEqual({ enabled: false, port: 9999, requireAuth: true, authToken: null });
     expect(config.protectedTags).toEqual(["do-not-touch", "archived"]);
     expect(config.callerId).toBe("ci-agent");
   });
@@ -157,6 +159,7 @@ describe("config loader (ticket #4)", () => {
     process.env.SHOPIFY_ROLLBACK_TTL_MS = "86400000";
     process.env.SHOPIFY_APPROVAL_SERVER_ENABLED = "false";
     process.env.SHOPIFY_APPROVAL_SERVER_PORT = "8080";
+    process.env.SHOPIFY_APPROVAL_SERVER_REQUIRE_AUTH = "false";
     process.env.SHOPIFY_PROTECTED_TAGS = "do-not-touch, production";
     process.env.SHOPIFY_CALLER_ID = "nightly-batch";
 
@@ -167,6 +170,7 @@ describe("config loader (ticket #4)", () => {
     expect(config.plans.rollbackTtlMs).toBe(86_400_000);
     expect(config.approvalServer.enabled).toBe(false);
     expect(config.approvalServer.port).toBe(8080);
+    expect(config.approvalServer.requireAuth).toBe(false);
     expect(config.protectedTags).toEqual(["do-not-touch", "production"]);
     expect(config.callerId).toBe("nightly-batch");
   });
@@ -182,6 +186,49 @@ describe("config loader (ticket #4)", () => {
     delete process.env.SHOPIFY_PLAN_TTL_MS;
     process.env.SHOPIFY_APPROVAL_SERVER_ENABLED = "yes";
     expect(() => loadConfig(writeTempConfig({}))).toThrow(/enabled/);
+
+    delete process.env.SHOPIFY_APPROVAL_SERVER_ENABLED;
+    process.env.SHOPIFY_APPROVAL_SERVER_REQUIRE_AUTH = "yes";
+    expect(() => loadConfig(writeTempConfig({}))).toThrow(/requireAuth/);
+  });
+
+  it("approval auth defaults to a generated per-start token (requireAuth true, authToken null)", () => {
+    process.env.SHOPIFY_ADMIN_TOKEN = TOKEN;
+    const config = loadConfig(writeTempConfig({}));
+    expect(config.approvalServer.requireAuth).toBe(true);
+    expect(config.approvalServer.authToken).toBeNull();
+  });
+
+  it("approvalServer.requireAuth is settable from the file, env beats file", () => {
+    process.env.SHOPIFY_ADMIN_TOKEN = TOKEN;
+    const fromFile = loadConfig(
+      writeTempConfig({ approvalServer: { requireAuth: false } }),
+    );
+    expect(fromFile.approvalServer.requireAuth).toBe(false);
+
+    process.env.SHOPIFY_APPROVAL_SERVER_REQUIRE_AUTH = "true";
+    const fromEnv = loadConfig(
+      writeTempConfig({ approvalServer: { requireAuth: false } }),
+    );
+    expect(fromEnv.approvalServer.requireAuth).toBe(true);
+  });
+
+  it("approvalServer.authToken comes from the environment only, never the file", () => {
+    process.env.SHOPIFY_ADMIN_TOKEN = TOKEN;
+    process.env.SHOPIFY_APPROVAL_SERVER_AUTH_TOKEN = "stable-operator-token";
+    const config = loadConfig(writeTempConfig({}));
+    expect(config.approvalServer.authToken).toBe("stable-operator-token");
+
+    delete process.env.SHOPIFY_APPROVAL_SERVER_AUTH_TOKEN;
+    expect(loadConfig(writeTempConfig({})).approvalServer.authToken).toBeNull();
+
+    process.env.SHOPIFY_APPROVAL_SERVER_AUTH_TOKEN = "";
+    expect(loadConfig(writeTempConfig({})).approvalServer.authToken).toBeNull();
+
+    delete process.env.SHOPIFY_APPROVAL_SERVER_AUTH_TOKEN;
+    expect(() =>
+      loadConfig(writeTempConfig({ approvalServer: { authToken: "file-token" } })),
+    ).toThrow(/authToken/);
   });
 
   it("rejects unknown config keys (typo protection)", () => {

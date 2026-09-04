@@ -53,8 +53,15 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function pendingPlans(baseUrl: string): Promise<Array<Record<string, unknown>>> {
-  const resp = await fetch(`${baseUrl}/api/plans`);
+function authHeaders(token: string | null): Record<string, string> {
+  return token === null ? {} : { Authorization: `Bearer ${token}` };
+}
+
+async function pendingPlans(
+  baseUrl: string,
+  token: string | null,
+): Promise<Array<Record<string, unknown>>> {
+  const resp = await fetch(`${baseUrl}/api/plans`, { headers: authHeaders(token) });
   expect(resp.status).toBe(200);
   const json = (await resp.json()) as { plans: Array<Record<string, unknown>> };
   return json.plans;
@@ -139,6 +146,9 @@ describe("localhost approval UI (ticket #16)", () => {
       port: 0,
       title: "test approval queue",
       renderPlan,
+      // The raw payload is omitted from GET /api/plans by default (core
+      // 0.3.0+); these tests assert the exact previewed manifest, so opt in.
+      exposeRawPayload: true,
     });
     baseUrl = `http://${approval.host}:${approval.port}`;
   });
@@ -178,7 +188,7 @@ describe("localhost approval UI (ticket #16)", () => {
   it("AC: a pending plan appears on GET /api/plans with tool, reason, count, and the rendered manifest table", async () => {
     const { planToken } = await preview(["a", "b"]);
 
-    const plans = await pendingPlans(baseUrl);
+    const plans = await pendingPlans(baseUrl, approval.token);
     const mine = plans.find((p) => p.plan_token === planToken);
     expect(mine).toBeDefined();
     expect(mine!.tool).toBe(TOOL);
@@ -194,7 +204,7 @@ describe("localhost approval UI (ticket #16)", () => {
     expect(table).toContain("price +20.0%");
 
     // The server-rendered HTML reflects the same plan without client-side JS.
-    const page = await fetch(`${baseUrl}/`);
+    const page = await fetch(`${baseUrl}/`, { headers: authHeaders(approval.token) });
     expect(page.status).toBe(200);
     const html = await page.text();
     expect(html).toContain(REASON);
@@ -212,7 +222,7 @@ describe("localhost approval UI (ticket #16)", () => {
       `${baseUrl}/api/plans/${planToken}/approve`,
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...authHeaders(approval.token) },
         body: JSON.stringify({ approvedBy: "reviewer@example.com" }),
       },
     );
@@ -220,7 +230,7 @@ describe("localhost approval UI (ticket #16)", () => {
     expect(((await approveResp.json()) as { ok: boolean }).ok).toBe(true);
 
     // An approved plan drops off the pending list.
-    const plans = await pendingPlans(baseUrl);
+    const plans = await pendingPlans(baseUrl, approval.token);
     expect(plans.find((p) => p.plan_token === planToken)).toBeUndefined();
 
     const result = await manager.executePlan(planToken, manifest);
@@ -234,7 +244,7 @@ describe("localhost approval UI (ticket #16)", () => {
 
     const rejectResp = await fetch(`${baseUrl}/api/plans/${planToken}/reject`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...authHeaders(approval.token) },
       body: JSON.stringify({
         rejectedBy: "reviewer@example.com",
         reason: "too broad, narrow the change",
@@ -252,7 +262,7 @@ describe("localhost approval UI (ticket #16)", () => {
     // Approving after rejecting does not un-kill it.
     const approveAfterReject = await fetch(
       `${baseUrl}/api/plans/${planToken}/approve`,
-      { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
+      { method: "POST", headers: { "Content-Type": "application/json", ...authHeaders(approval.token) }, body: "{}" },
     );
     expect(approveAfterReject.status).toBe(409);
     expect(((await approveAfterReject.json()) as { code: string }).code).toBe(
@@ -260,13 +270,13 @@ describe("localhost approval UI (ticket #16)", () => {
     );
 
     // The tombstone stays off the pending list.
-    const plans = await pendingPlans(baseUrl);
+    const plans = await pendingPlans(baseUrl, approval.token);
     expect(plans.find((p) => p.plan_token === planToken)).toBeUndefined();
 
     // Rejecting twice is idempotent, not an error.
     const secondReject = await fetch(`${baseUrl}/api/plans/${planToken}/reject`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...authHeaders(approval.token) },
       body: "{}",
     });
     expect(secondReject.status).toBe(200);
@@ -289,6 +299,7 @@ describe("localhost approval UI: expired plans (ticket #16)", () => {
     approval = await startApprovalServer<Manifest<PriceManifestItem>>(planStore, {
       port: 0,
       renderPlan,
+      exposeRawPayload: true,
     });
     baseUrl = `http://${approval.host}:${approval.port}`;
   });
@@ -304,17 +315,17 @@ describe("localhost approval UI: expired plans (ticket #16)", () => {
     );
     expect(preview.status).toBe("awaiting_approval");
 
-    const before = await pendingPlans(baseUrl);
+    const before = await pendingPlans(baseUrl, approval.token);
     expect(before.find((p) => p.plan_token === preview.planToken)).toBeDefined();
 
     await sleep(200);
 
-    const after = await pendingPlans(baseUrl);
+    const after = await pendingPlans(baseUrl, approval.token);
     expect(after.find((p) => p.plan_token === preview.planToken)).toBeUndefined();
 
     const approveResp = await fetch(
       `${baseUrl}/api/plans/${preview.planToken}/approve`,
-      { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
+      { method: "POST", headers: { "Content-Type": "application/json", ...authHeaders(approval.token) }, body: "{}" },
     );
     expect(approveResp.status).toBe(410);
     expect(((await approveResp.json()) as { code: string }).code).toBe(
@@ -338,6 +349,7 @@ describe("localhost approval UI works with no MCP client connected (ticket #16)"
     approval = await startApprovalServer<Manifest<PriceManifestItem>>(planStore, {
       port: 0,
       renderPlan,
+      exposeRawPayload: true,
     });
     baseUrl = `http://${approval.host}:${approval.port}`;
   });
@@ -346,22 +358,112 @@ describe("localhost approval UI works with no MCP client connected (ticket #16)"
     await approval?.close().catch(() => {});
   });
 
-  it("GET / and GET /api/plans succeed with plain fetch()", async () => {
-    const page = await fetch(`${baseUrl}/`);
+  it("GET / and GET /api/plans succeed with the bearer token", async () => {
+    const page = await fetch(`${baseUrl}/`, { headers: authHeaders(approval.token) });
     expect(page.status).toBe(200);
     expect(page.headers.get("content-type")).toMatch(/text\/html/);
 
-    const api = await fetch(`${baseUrl}/api/plans`);
+    const api = await fetch(`${baseUrl}/api/plans`, { headers: authHeaders(approval.token) });
     expect(api.status).toBe(200);
     const json = (await api.json()) as { plans: unknown[] };
     expect(json.plans).toEqual([]);
   });
 
   it("an unknown route returns a structured 404", async () => {
-    const resp = await fetch(`${baseUrl}/nope`);
+    const resp = await fetch(`${baseUrl}/nope`, { headers: authHeaders(approval.token) });
     expect(resp.status).toBe(404);
     const json = (await resp.json()) as { ok: boolean; code: string };
     expect(json.ok).toBe(false);
     expect(json.code).toBe("NOT_FOUND");
+  });
+});
+
+describe("localhost approval UI: bearer-token auth (core 0.4.0)", () => {
+  let planStore: PlanStore<Manifest<PriceManifestItem>>;
+  let approval: ApprovalServerHandle;
+  let baseUrl: string;
+
+  beforeEach(async () => {
+    planStore = new PlanStore<Manifest<PriceManifestItem>>({ planTtlMs: 60_000 });
+    approval = await startApprovalServer<Manifest<PriceManifestItem>>(planStore, {
+      port: 0,
+      renderPlan,
+    });
+    baseUrl = `http://${approval.host}:${approval.port}`;
+  });
+
+  afterEach(async () => {
+    await approval?.close().catch(() => {});
+  });
+
+  it("hands out a bearer token on the handle and refuses unauthenticated requests with 401", async () => {
+    expect(approval.token).toBeTruthy();
+
+    const api = await fetch(`${baseUrl}/api/plans`);
+    expect(api.status).toBe(401);
+    expect(((await api.json()) as { code: string }).code).toBe("UNAUTHORIZED");
+
+    const page = await fetch(`${baseUrl}/`);
+    expect(page.status).toBe(401);
+
+    const approve = await fetch(`${baseUrl}/api/plans/some-token/approve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    expect(approve.status).toBe(401);
+    expect(((await approve.json()) as { code: string }).code).toBe("UNAUTHORIZED");
+  });
+
+  it("refuses a wrong bearer token with 401", async () => {
+    const resp = await fetch(`${baseUrl}/api/plans`, {
+      headers: { Authorization: "Bearer wrong-token" },
+    });
+    expect(resp.status).toBe(401);
+    expect(((await resp.json()) as { code: string }).code).toBe("UNAUTHORIZED");
+  });
+
+  it("accepts the ?token= query fallback (a browser navigation cannot set headers)", async () => {
+    const api = await fetch(`${baseUrl}/api/plans?token=${approval.token}`);
+    expect(api.status).toBe(200);
+
+    const page = await fetch(`${baseUrl}/?token=${approval.token}`);
+    expect(page.status).toBe(200);
+    expect(page.headers.get("content-type")).toMatch(/text\/html/);
+  });
+
+  it("honors an explicit authToken option", async () => {
+    const explicit = await startApprovalServer<Manifest<PriceManifestItem>>(planStore, {
+      port: 0,
+      renderPlan,
+      authToken: "stable-operator-token",
+    });
+    try {
+      expect(explicit.token).toBe("stable-operator-token");
+      const base = `http://${explicit.host}:${explicit.port}`;
+      expect((await fetch(`${base}/api/plans`)).status).toBe(401);
+      const authed = await fetch(`${base}/api/plans`, {
+        headers: { Authorization: "Bearer stable-operator-token" },
+      });
+      expect(authed.status).toBe(200);
+    } finally {
+      await explicit.close().catch(() => {});
+    }
+  });
+
+  it("requireAuth: false opts out — token is null and plain fetch works", async () => {
+    const openStore = new PlanStore<Manifest<PriceManifestItem>>({ planTtlMs: 60_000 });
+    const open = await startApprovalServer<Manifest<PriceManifestItem>>(openStore, {
+      port: 0,
+      renderPlan,
+      requireAuth: false,
+    });
+    try {
+      expect(open.token).toBeNull();
+      const resp = await fetch(`http://${open.host}:${open.port}/api/plans`);
+      expect(resp.status).toBe(200);
+    } finally {
+      await open.close().catch(() => {});
+    }
   });
 });

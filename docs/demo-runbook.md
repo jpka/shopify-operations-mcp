@@ -75,8 +75,10 @@ node dist/index.js
 You should see (among the startup logs):
 
 ```
-[shopify-operations-mcp] localhost approval UI listening on http://127.0.0.1:4319
+[shopify-operations-mcp] localhost approval UI listening on http://127.0.0.1:4319/?token=<token>
 ```
+
+The `?token=` bearer authenticates every approval-server route (safe-write-mcp-core 0.4.0) — copy the full URL from the log; the page's Approve/Reject buttons carry it from there. For a stable token across takes (so a bookmarked URL survives restarts), export `SHOPIFY_APPROVAL_SERVER_AUTH_TOKEN` before starting.
 
 Leave the process running. The MCP stdio transport and the approval HTTP server (bound to `127.0.0.1` only) share one process.
 
@@ -185,10 +187,10 @@ update_prices({
 
 156 ≥ the 25-item approval threshold, and −90% is far past the 30% `maxPriceChangePct` guard — either gate alone would require a human. The response is the exact before/after manifest the token is bound to; **nothing has changed in the store.**
 
-**Approve in the browser.** Open `http://127.0.0.1:4319/`. You'll see one pending card — `update_prices: 156 items` — with a monospace table of `Item | Before | After | Reason | Flags` (the Flags column shows `price -90.0%` per row) and the manifest digest. Scroll a few rows, then click **Approve** (optionally typing an approver name). The page confirms *Approved*.
+**Approve in the browser.** Open the token-bearing approval URL from the startup log (`http://127.0.0.1:4319/?token=<token>`). You'll see one pending card — `update_prices: 156 items` — with a monospace table of `Item | Before | After | Reason | Flags` (the Flags column shows `price -90.0%` per row) and the manifest digest. Scroll a few rows, then click **Approve** (optionally typing an approver name). The page confirms *Approved*.
 
 > Headless alternative (computer-use agent): the same action over the JSON API —
-> `curl -X POST http://127.0.0.1:4319/api/plans/<plan_token>/approve -H 'Content-Type: application/json' -d '{"approvedBy":"demo-operator"}'`
+> `TOKEN=<token-from-the-startup-log> curl -X POST http://127.0.0.1:4319/api/plans/<plan_token>/approve -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"approvedBy":"demo-operator"}'`
 
 **Execute.** Back in the client, the agent passes the token back with the **exact manifest from the preview response**:
 
@@ -341,7 +343,7 @@ Restore the file afterward. This makes the "tamper-evident" claim concrete on ca
 ## Checklist
 
 - [ ] Store seeded with `--seed 42` (768 variants; `sale` tag = 156).
-- [ ] Fresh audit file; server running; approval UI up at `http://127.0.0.1:4319`.
+- [ ] Fresh audit file; server running; approval UI up at the token-bearing URL from the startup log.
 - [ ] Beat 1: `HARD_MAX_ITEMS_EXCEEDED` on the 768-variant reprice.
 - [ ] Beat 2: `awaiting_approval` → approved in UI → `executed` 156/156 → verified.
 - [ ] Beat 3: `rolled_back` 156/156 → verified.

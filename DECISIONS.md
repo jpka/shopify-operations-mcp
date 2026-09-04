@@ -5,6 +5,81 @@ were, what we picked, and the reasoning a reviewer can check. Newest first.
 
 ---
 
+## 2026-09-04 — safe-write-mcp-core 0.4.0: registry dep, two-step execute handoff, bearer-token approval auth
+
+**Question:** safe-write-mcp-core 0.4.0 is published to npm, and its two
+behavioral changes both break this server as written: (1) `consume()` without
+a current data digest now fails closed with `DATA_DIGEST_MISMATCH` whenever
+the plan carries one (every `PlanManager` plan does), and (2) the approval
+server requires a per-session bearer token on every route by default. How far
+does the migration go — minimal shims, or the core's recommended paths?
+
+**Decision:** three parts, all in. (a) The dependency moves from
+`file:../safe-write-mcp-core` to the npm registry (`^0.4.0`); CI drops its
+sibling-checkout steps and `npm ci` pulls from the registry. (b)
+`PlanManager.executePlan` **and** `executeCancelOrder` migrate from the
+legacy one-step `consume()` to the core's two-step handoff: re-read current
+state for the reversible tools (no re-read for cancel, whose plan carries no
+dataDigest worth checking), then
+`beginExecute`, per-item ledger, `confirmExecuted`. For the reversible tools
+the migration is forced — `consume()` without a current digest now fails
+closed. For `cancel_order` it is chosen: the legacy path still works (null
+digest ⇒ digest gate skipped), but it emits `executed` *before* the
+`orderCancel` mutation runs, so a crash in between leaves the audit claiming
+a cancellation that never happened with the token burned — the exact causal
+disconnect the handoff exists to close, on the server's highest-stakes
+operation. A core `DATA_DIGEST_MISMATCH` refusal is translated to the host's
+`STATE_CHANGED` error (same code, same `refused` audit row, executor never
+called). A completed ledger — even with per-item failures — is confirmed,
+preserving single-use (retrying would double-apply the succeeded items); an
+unexpected throw out of the ledger leaves the token `executing` as an unknown
+outcome rather than confirming either way. (c) The
+bearer token is surfaced, not bypassed: `index.ts` prints the token-bearing
+approval URL once on stderr, and two config knobs arrive —
+`approvalServer.requireAuth` (default true, file or
+`SHOPIFY_APPROVAL_SERVER_REQUIRE_AUTH`) and `approvalServer.authToken`
+(env-only `SHOPIFY_APPROVAL_SERVER_AUTH_TOKEN`, never the config file, same
+discipline as the Admin API token) for operators who need a stable token for
+scripted approval calls.
+
+**Reasoning.** (a) The `file:` dependency existed only until the core
+published to npm; 0.4.0 is published, so the condition the repo's own
+conventions set for switching is met, and pinning a registry range is
+stronger than pinning a sibling commit hash in CI. (b) Passing the digest to
+the legacy `consume()` would have fixed the immediate failures, but
+`consume()` emits `executed` before the side effect runs — the exact causal
+disconnect the two-step handoff exists to close — and the core marks it
+not-recommended for crash-sensitive paths. The reorder (read current state
+*before* `beginExecute`) is forced by the handoff shape: the core needs the
+current digest up front. Gate ordering, stated honestly: fingerprint still
+beats digest, but digest now beats approval — previously approval beat
+digest, because the old one-step `consume()` enforced approval before the
+host's own digest check ran. The new order is strictly more actionable (a
+drifted-and-unapproved plan reports `STATE_CHANGED` → re-preview, instead of
+`AWAITING_APPROVAL` → wait for a human → `STATE_CHANGED` after they
+bothered), and `PLAN_MISMATCH` still surfaces exactly as before. Two costs
+ride along and are accepted: the current-state re-read now runs before any
+gate, so refused tokens (unknown/rejected/expired/used) each cost one wasted
+billable read; and a re-read failure fails closed before any gate evaluates —
+the safe direction (never execute without a successful re-read), at the price
+that a structured refusal during an outage becomes a raw read error. A
+drift-refused token stays valid until its TTL (it was never begun), which is
+safe: re-executing the same manifest can only pass the digest gate if the
+world matches the preview again. (c)
+`requireAuth: false` exists only as the core's documented explicit opt-out;
+defaulting it true keeps the server's threat model honest — loopback binding
+never stopped another local process, the bearer token does. The `authToken`
+env var answers the demo-runbook's curl fallback: without a stable token,
+every restart invalidates scripted approval calls.
+
+**Alternative rejected:** `requireAuth: false` by default for a zero-touch
+upgrade. It would have kept old curl commands working, but it silently keeps
+the exact hole 0.4.0 closed (any local process approving plans with a bare
+plan token) — a weaker guarantee adopted for convenience, the thing this
+project rejects.
+
+---
+
 ## 2026-08-13 — Preview as computed diff: no transactions on Shopify (#9)
 
 **Ticket:** #9 — two-phase manifest framework + `execute_plan`.

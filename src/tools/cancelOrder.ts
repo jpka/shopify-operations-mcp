@@ -24,7 +24,7 @@
  */
 import { PlanStore } from "safe-write-mcp-core";
 import type { AuditEvent, AuditSink, PlanMeta } from "safe-write-mcp-core";
-import type { Manifest, ManifestBuilder, ManifestItem, StateReader } from "../plans/manifest.js";
+import type { Manifest, ManifestBuilder, ManifestItem } from "../plans/manifest.js";
 import type { Executor, ItemOutcome } from "../plans/executor.js";
 import { runLedger } from "../plans/executor.js";
 
@@ -224,33 +224,6 @@ class CancelOrderManifestBuilder implements ManifestBuilder<CancelOrderManifestI
   }
 }
 
-class CancelOrderStateReader implements StateReader<CancelOrderPreview> {
-  constructor(
-    private client: AdminClient,
-    private args: CancelOrderArgs,
-  ) {}
-
-  async readCurrent(refs: readonly string[]): Promise<Readonly<Record<string, CancelOrderPreview>>> {
-    if (refs.length === 0) return {};
-    const data = await this.client.graphql<CancelOrderPreviewResponse>({
-      query: ORDER_CANCEL_PREVIEW_QUERY,
-      variables: { id: this.args.orderId },
-      cost: 10,
-    });
-    const order = data.orderCancelOrder.order;
-    return {
-      [this.args.orderId]: {
-        orderId: order.id,
-        orderName: order.name,
-        totalPrice: order.totalPrice,
-        refundedAmount: "(unknown at execute time)",
-        restockedLineItems: [],
-        flags: [],
-      },
-    };
-  }
-}
-
 class CancelOrderExecutor implements Executor<CancelOrderManifestItem, void> {
   constructor(
     private client: AdminClient,
@@ -373,19 +346,45 @@ export async function executeCancelOrder(
   const startedAt = Date.now();
   const tool = TOOL_CANCEL_ORDER;
 
-  const consumed = planStore.consume(planToken, manifest);
-  if (!consumed.ok) {
-    throw consumed.error;
+  // Same two-step handoff as PlanManager.executePlan: the cancel plan carries
+  // no dataDigest (cancellation has no re-readable before-state worth
+  // binding), so the digest gate is a no-op and only the lifecycle gates
+  // apply — but the `executed` audit event is still only emitted after the
+  // orderCancel mutation actually runs, and a crash mid-ledger leaves the
+  // token `executing` (reconcilable) instead of burned.
+  const begun = planStore.beginExecute(planToken, manifest);
+  if (!begun.ok) {
+    throw begun.error;
   }
-  const meta = consumed.meta!;
+  const meta = begun.meta;
 
-  const stateReader = new CancelOrderStateReader(client, args);
   const executor = new CancelOrderExecutor(client, args);
 
   const ledger = await runLedger(manifest.items, executor);
 
   const succeededCount = ledger.succeeded.length;
   const failedCount = ledger.failed.length;
+
+  const confirmed = planStore.confirmExecuted(planToken);
+  if (!confirmed.ok) {
+    // Unreachable in-process: nothing between beginExecute and
+    // confirmExecuted settles this token. Emit before throwing so an
+    // execution that changed the store is never invisible in the audit trail.
+    // Status is deliberately "executed", not "failed": the ledger ran, so the
+    // store changed; the CONFIRM_FAILED detail flags that the token itself
+    // was never marked used.
+    emitExecuteAudit(
+      audit,
+      startedAt,
+      planToken,
+      meta,
+      ledger,
+      `CONFIRM_FAILED (${confirmed.error.code}) after the ledger completed ` +
+        `(succeeded=${succeededCount}, failed=${failedCount}); side effects may ` +
+        `have applied — do not blindly retry`,
+    );
+    throw confirmed.error;
+  }
 
   emitExecuteAudit(audit, startedAt, planToken, meta, ledger);
 
@@ -432,16 +431,19 @@ function emitExecuteAudit(
   planToken: string,
   meta: PlanMeta,
   ledger: { succeeded: readonly { ref: string }[]; failed: readonly { ref: string; error?: { code: string; message: string } }[] },
+  detailOverride?: string,
 ): void {
-  const detail = JSON.stringify({
-    succeeded: ledger.succeeded.length,
-    failed: ledger.failed.length,
-    failures: ledger.failed.map((o) => ({
-      ref: o.ref,
-      code: o.error?.code ?? null,
-      message: o.error?.message ?? null,
-    })),
-  });
+  const detail =
+    detailOverride ??
+    JSON.stringify({
+      succeeded: ledger.succeeded.length,
+      failed: ledger.failed.length,
+      failures: ledger.failed.map((o) => ({
+        ref: o.ref,
+        code: o.error?.code ?? null,
+        message: o.error?.message ?? null,
+      })),
+    });
 
   const event: AuditEvent = {
     ts: Date.now(),

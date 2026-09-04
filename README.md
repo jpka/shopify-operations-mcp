@@ -46,7 +46,7 @@ flowchart TB
 
 1. **Preview** — reads current state and computes what would change, performing zero mutation calls
 2. **Token** — issues a plan token bound to the exact previewed manifest via a SHA-256 fingerprint
-3. **Approval** — plans exceeding `approvalRequiredAboveItems` (default 25) or containing always-gated operations wait for human approval at `http://127.0.0.1:4319/`
+3. **Approval** — plans exceeding `approvalRequiredAboveItems` (default 25) or containing always-gated operations wait for human approval at the token-bearing URL the server prints on startup (e.g. `http://127.0.0.1:4319/?token=<token>`)
 4. **Execute** — re-reads current values, refuses if they drifted from the preview (`STATE_CHANGED`), then applies mutations per-item with a full success/failure ledger
 
 A plan whose manifest exceeds `hardMaxItems` (default 250) is refused outright — no token, no approval path.
@@ -106,7 +106,8 @@ Configuration file (default `config.json` in the working directory, or path via 
   },
   "approvalServer": {
     "enabled": true,
-    "port": 4319
+    "port": 4319,
+    "requireAuth": true
   },
   "protectedTags": ["do-not-touch"],
   "callerId": "shopify-operations-mcp"
@@ -127,6 +128,8 @@ Configuration file (default `config.json` in the working directory, or path via 
 | `plans.rollbackTtlMs` | `positive int` | `86400000` | Rollback window (ms, default 24h). Overridable: `SHOPIFY_ROLLBACK_TTL_MS` |
 | `approvalServer.enabled` | `boolean` | `true` | Start localhost approval UI alongside MCP server. Overridable: `SHOPIFY_APPROVAL_SERVER_ENABLED` |
 | `approvalServer.port` | `positive int` | `4319` | Port for localhost approval UI (127.0.0.1 only). Overridable: `SHOPIFY_APPROVAL_SERVER_PORT` |
+| `approvalServer.requireAuth` | `boolean` | `true` | Require the per-session bearer token on every approval-server route. Set `false` to fall back to pre-0.4.0 behavior (not recommended). Overridable: `SHOPIFY_APPROVAL_SERVER_REQUIRE_AUTH` |
+| `approvalServer.authToken` | `string?` | *(env only)* | Explicit bearer token for the approval server — **never in config file**, only `SHOPIFY_APPROVAL_SERVER_AUTH_TOKEN` env var. Unset means a random token is generated per start and printed once on stderr. |
 | `protectedTags` | `string[]` | `["do-not-touch"]` | Tags that plans may never modify. Overridable: `SHOPIFY_PROTECTED_TAGS` (comma-separated) |
 | `callerId` | `string` | `"unknown"` | Identity recorded on every audit row. Overridable: `SHOPIFY_CALLER_ID` |
 
@@ -295,7 +298,8 @@ Agent calls preview tool
 
 A plain-HTML page for a human to approve or reject plans above the threshold. Runs as its own local-only HTTP server, started alongside the MCP server.
 
-- **Access:** `http://127.0.0.1:4319/` (or configured `approvalServer.port`) on the machine running the server. Unreachable from other machines.
+- **Access:** the token-bearing URL the server prints on startup (e.g. `http://127.0.0.1:4319/?token=<token>`) on the machine running the server. Unreachable from other machines.
+- **Auth:** every route — including the read-only GET ones — requires a per-session bearer token (`Authorization: Bearer <token>` header, or the `?token=` query fallback the printed URL uses). The token is generated per start unless `SHOPIFY_APPROVAL_SERVER_AUTH_TOKEN` sets a stable one; scripted callers pass it as a header (`curl -H "Authorization: Bearer $TOKEN" ...`). Prefer the env token for scripted or long-lived use rather than scraping the startup log — stderr is routinely captured to log files, where the credential would persist. Loopback binding plus Host/Origin checks stop a hostile browser page, but only the bearer token stops another local process that knows a plan token. Set `approvalServer.requireAuth: false` to fall back to pre-0.4.0 behavior (not recommended).
 - **API:** `GET /api/plans` returns pending plans as JSON; `POST /api/plans/:token/approve` and `POST /api/plans/:token/reject` handle approval.
 - **Security boundary:** approval/rejection is **never** exposed as an MCP tool — the agent cannot approve its own plans.
 
@@ -393,7 +397,7 @@ Stated plainly, not hidden:
 
 - **Single store, no multi-tenancy.** One server process talks to one Shopify store. Running for multiple stores means running multiple server instances with separate credentials and audit files.
 
-- **No per-user auth.** `callerId` identifies the deployment (default `"unknown"`), not an individual person. There is no per-MCP-session or per-user authentication in v1. Anyone who can reach the server's stdio transport (or `127.0.0.1:4319` for approvals) can use it with the configured store credentials.
+- **No per-user auth.** `callerId` identifies the deployment (default `"unknown"`), not an individual person. There is no per-MCP-session or per-user authentication in v1. Anyone who can reach the server's stdio transport can use it with the configured store credentials; anyone holding the approval-server bearer token (or reaching the UI with auth disabled) can approve plans.
 
 - **`STATE_CHANGED` is a pre-write drift check, not a universal compare-and-swap.** The re-read catches drift that exists *before* the mutation is sent. It does not close the window between re-read and write. Shopify exposes provider-level compare-and-swap for some operations (e.g. `changeFromQuantity` for inventory) but not all (plain price updates are last-write-wins).
 

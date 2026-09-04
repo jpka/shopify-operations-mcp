@@ -42,9 +42,24 @@ async function main(): Promise<void> {
       port: config.approvalServer.port,
       title: "shopify-operations-mcp — approval queue",
       renderPlan,
+      // Deliberately no exposeRawPayload: the raw manifest stays out of the
+      // JSON route and approval cards render through the host's renderPlan
+      // redaction (see tests/approvalServer.test.ts, which opts in only to
+      // assert the exact previewed payload).
+      requireAuth: config.approvalServer.requireAuth,
+      ...(config.approvalServer.authToken
+        ? { authToken: config.approvalServer.authToken }
+        : {}),
     });
+    // The approval server requires a per-session bearer token by default
+    // (safe-write-mcp-core 0.4.0): print it once, embedded in the URL, so a
+    // human opening it in a browser authenticates on first load. The page's
+    // own Approve/Reject buttons carry the token from there.
+    const base = `http://${approval.host}:${approval.port}`;
     console.error(
-      `[shopify-operations-mcp] localhost approval UI listening on http://${approval.host}:${approval.port}`,
+      approval.token
+        ? `[shopify-operations-mcp] localhost approval UI listening on ${base}/?token=${approval.token}`
+        : `[shopify-operations-mcp] localhost approval UI listening on ${base} (auth disabled)`,
     );
   }
 

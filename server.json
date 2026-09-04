@@ -51,6 +51,20 @@
           "format": "string"
         },
         {
+          "name": "SHOPIFY_APPROVAL_SERVER_REQUIRE_AUTH",
+          "description": "Whether every approval-server route requires the per-session bearer token. Default true; set to \"false\" to fall back to pre-0.4.0 behavior (not recommended).",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "SHOPIFY_APPROVAL_SERVER_AUTH_TOKEN",
+          "description": "Explicit bearer token for the approval server. Unset means a random token is generated per start and printed on stderr. Only ever from the environment — never from the config file.",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
           "name": "SHOPIFY_PROTECTED_TAGS",
           "description": "Comma-separated tags that plans may never modify; any plan touching an item carrying one is refused. Default do-not-touch.",
           "isRequired": false,
