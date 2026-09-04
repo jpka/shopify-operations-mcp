@@ -12,7 +12,8 @@
   },
   "approvalServer": {
     "enabled": true,
-    "port": 4319
+    "port": 4319,
+    "requireAuth": true
   },
   "protectedTags": ["do-not-touch"],
   "callerId": "unknown"

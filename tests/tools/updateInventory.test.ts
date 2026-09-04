@@ -37,7 +37,7 @@ function appConfig(overrides: Partial<AppConfig> = {}): AppConfig {
       maxPriceChangePct: 30,
       rollbackTtlMs: 86_400_000,
     },
-    approvalServer: { enabled: true, port: 4319 },
+    approvalServer: { enabled: true, port: 4319, requireAuth: true, authToken: null },
     protectedTags: ["do-not-touch"],
     callerId: "unknown",
     ...overrides,

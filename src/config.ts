@@ -28,6 +28,8 @@ export const DEFAULT_APPROVAL_SERVER_PORT = 4319;
 export const DEFAULT_APPROVAL_SERVER_CONFIG = {
   enabled: true,
   port: DEFAULT_APPROVAL_SERVER_PORT,
+  requireAuth: true,
+  authToken: null,
 } as const;
 
 export const DEFAULT_PROTECTED_TAGS = ["do-not-touch"] as const;
@@ -93,6 +95,24 @@ export interface ApprovalServerConfig {
    * 4319. Overridable with SHOPIFY_APPROVAL_SERVER_PORT.
    */
   port: number;
+  /**
+   * Whether every approval-server route — including the read-only GET ones —
+   * requires the per-session bearer token (safe-write-mcp-core 0.4.0
+   * behavior). Default true: loopback binding plus the Host/Origin checks
+   * only stop a hostile browser page, not another local process that knows a
+   * plan token. Set false to fall back to the pre-0.4.0 behavior (not
+   * recommended). Overridable with SHOPIFY_APPROVAL_SERVER_REQUIRE_AUTH.
+   */
+  requireAuth: boolean;
+  /**
+   * Explicit bearer token for the approval server, or null for a random one
+   * generated per start (printed once on stderr alongside the approval URL).
+   * Deliberately only ever sourced from the SHOPIFY_APPROVAL_SERVER_AUTH_TOKEN
+   * environment variable — never from the config file, same as the Admin API
+   * token. A stable token lets scripted operators call the approval API
+   * without scraping the startup log.
+   */
+  authToken: string | null;
 }
 
 export interface AppConfig {
@@ -154,6 +174,9 @@ const configSchema = z
         port: positiveInt
           .max(65_535)
           .default(DEFAULT_APPROVAL_SERVER_CONFIG.port),
+        requireAuth: booleanField.default(
+          DEFAULT_APPROVAL_SERVER_CONFIG.requireAuth,
+        ),
       })
       .strict(),
     protectedTags: z
@@ -189,6 +212,8 @@ export const CONFIG_ENV_VARS = [
   "SHOPIFY_ROLLBACK_TTL_MS",
   "SHOPIFY_APPROVAL_SERVER_ENABLED",
   "SHOPIFY_APPROVAL_SERVER_PORT",
+  "SHOPIFY_APPROVAL_SERVER_REQUIRE_AUTH",
+  "SHOPIFY_APPROVAL_SERVER_AUTH_TOKEN",
   "SHOPIFY_PROTECTED_TAGS",
   "SHOPIFY_CALLER_ID",
   "SHOPIFY_CONFIG",
@@ -279,6 +304,10 @@ export function loadConfig(configPath?: string): AppConfig {
         rawApprovalServer.enabled,
       ),
       port: pick(env.SHOPIFY_APPROVAL_SERVER_PORT, rawApprovalServer.port),
+      requireAuth: pick(
+        env.SHOPIFY_APPROVAL_SERVER_REQUIRE_AUTH,
+        rawApprovalServer.requireAuth,
+      ),
     },
     protectedTags:
       env.SHOPIFY_PROTECTED_TAGS !== undefined &&
@@ -299,6 +328,12 @@ export function loadConfig(configPath?: string): AppConfig {
     );
   }
 
+  // Env-only, like the Admin API token: a bearer secret never belongs in the
+  // config file (the strict schema above rejects an `authToken` file key).
+  // Empty/whitespace-only means "no explicit token" (a random one is
+  // generated per start, or none at all when requireAuth is false).
+  const authToken = env.SHOPIFY_APPROVAL_SERVER_AUTH_TOKEN?.trim() || null;
+
   const result = configSchema.safeParse(input);
   if (!result.success) {
     const issues = result.error.issues
@@ -312,6 +347,10 @@ export function loadConfig(configPath?: string): AppConfig {
     shopify: {
       ...result.data.shopify,
       adminToken,
+    },
+    approvalServer: {
+      ...result.data.approvalServer,
+      authToken,
     },
   });
 }

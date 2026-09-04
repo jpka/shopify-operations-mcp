@@ -87,14 +87,15 @@ export interface ExecuteResult<TItem extends ManifestItem, TResult = unknown> {
 /**
  * The host-side orchestrator of the two-phase pattern, wired in the order the
  * core and the sibling repo prescribe: plan creation from a previewed
- * manifest (pure reads, zero mutation), then — on execute — core consume →
- * STATE_CHANGED drift check → per-item executor → audit.
+ * manifest (pure reads, zero mutation), then — on execute — re-read current
+ * state, core beginExecute → STATE_CHANGED drift check → per-item executor →
+ * core confirmExecuted → audit.
  *
  * execute_plan wiring: the MCP tool layer is a later ticket (the server and
  * its @modelcontextprotocol/sdk dependency land there); `executePlan` is the
- * exact handler body that tool will call — consume the token from the core,
- * refuse on drift, run the executor with a per-item ledger, emit the host
- * audit row — mirroring sw-postgres-mcp's `TwoPhaseWrite.execute`.
+ * exact handler body that tool will call — begin the token from the core,
+ * refuse on drift, run the executor with a per-item ledger, confirm the
+ * execution, emit the host audit row — mirroring sw-postgres-mcp's `TwoPhaseWrite.execute`.
  */
 export class PlanManager<
   TItem extends ManifestItem<TBefore>,
@@ -181,24 +182,34 @@ export class PlanManager<
   }
 
   /**
-   * Execute: consume the token (single-use, expiry, fingerprint, approval),
-   * re-read current values and refuse with STATE_CHANGED if the before-digest
-   * no longer matches the preview's, then run the per-item executor and emit
-   * the host audit row. A failure never marks the token usable again, and a
-   * refused (drifted) plan's token is consumed just as in the sibling repo —
-   * re-preview to get a fresh one.
+   * Execute: re-read current values, begin the token in the core (single-use,
+   * expiry, fingerprint, data-digest, approval gates), refuse with
+   * STATE_CHANGED if the before-digest no longer matches the preview's, then
+   * run the per-item executor, confirm the execution, and emit the host audit
+   * row.
+   *
+   * The core enforces the digest itself: `beginExecute` is given the freshly
+   * re-read digest and fails closed with DATA_DIGEST_MISMATCH on any drift,
+   * which is translated here to the host's STATE_CHANGED error so the
+   * observable contract (code, refused audit row, executor never called) is
+   * unchanged. A drift-refused token was never begun, so — unlike the old
+   * one-step consume — it stays valid until its TTL; re-preview for a fresh
+   * token rather than retrying a stale picture.
+   *
+   * Crash safety follows the core's two-step handoff: the `executed` audit
+   * event (core and host rows alike) is only emitted after the ledger
+   * completes, so it is never causally disconnected from side effects that
+   * really ran. A ledger that completes — even with per-item failures — is
+   * confirmed (single-use is preserved: retrying would double-apply the
+   * succeeded items). An unexpected throw out of the ledger is an unknown
+   * outcome, so the token is deliberately left `executing` (queryable via
+   * `listExecuting`, reconcilable) rather than confirmed either way.
    */
   async executePlan(
     planToken: string,
     manifest: Manifest<TItem>,
   ): Promise<ExecuteResult<TItem, TResult>> {
     const startedAt = Date.now();
-    const consumed = this.store.consume(planToken, manifest);
-    if (!consumed.ok) {
-      // The core already audited the "failed" transition for this refusal.
-      throw consumed.error;
-    }
-    const meta = consumed.meta;
 
     const current = await this.stateReader.readCurrent(
       manifest.items.map((item) => item.ref),
@@ -208,17 +219,29 @@ export class PlanManager<
     // STATE_CHANGED drift check: there is no prior state to compare against.
     // The beforeDigest was computed with null (item did not exist); after
     // execute the state reader returns the created item, so digests differ
-    // by design — the "drift" is the intended create.
+    // by design — the "drift" is the intended create. The preview's digest
+    // is passed through as the current one, asserting "nothing to compare".
     const isPureCreate = manifest.items.every((item) => item.before === null);
+    const currentDigest = isPureCreate
+      ? manifest.beforeDigest
+      : beforeDigestOf(
+          manifest.items.map((item) => ({
+            ref: item.ref,
+            before: current[item.ref],
+          })),
+        );
 
-    if (!isPureCreate) {
-      const currentDigest = beforeDigestOf(
-        manifest.items.map((item) => ({
-          ref: item.ref,
-          before: current[item.ref],
-        })),
-      );
-      if (currentDigest !== meta.dataDigest) {
+    const begun = this.store.beginExecute(planToken, manifest, currentDigest);
+    if (!begun.ok) {
+      if (begun.error.code === "DATA_DIGEST_MISMATCH") {
+        const meta = begun.meta ?? {
+          tool: "unknown",
+          reason: null,
+          callerId: this.callerId,
+          previewCount: manifest.items.length,
+          dataDigest: null,
+          extra: {},
+        };
         this.emit(
           startedAt,
           planToken,
@@ -232,9 +255,21 @@ export class PlanManager<
           "Another write changed matching data since the preview. Re-run the preview to obtain a fresh plan and token.",
         );
       }
+      // Every other gate refusal (rejected, used, expired, fingerprint
+      // mismatch, awaiting approval) keeps the core's own error shape — the
+      // core already audited the "failed" transition for this refusal.
+      throw begun.error;
     }
+    const meta = begun.meta;
 
     const ledger = await runLedger(manifest.items, this.executor);
+    const confirmed = this.store.confirmExecuted(planToken);
+    if (!confirmed.ok) {
+      // Unreachable: nothing between beginExecute and confirmExecuted can
+      // settle this token (the ledger performs side effects, not plan
+      // transitions), so the token must still be executing here.
+      throw confirmed.error;
+    }
     this.emit(
       startedAt,
       planToken,
