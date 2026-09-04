@@ -42,6 +42,10 @@ async function main(): Promise<void> {
       port: config.approvalServer.port,
       title: "shopify-operations-mcp — approval queue",
       renderPlan,
+      // Deliberately no exposeRawPayload: the raw manifest stays out of the
+      // JSON route and approval cards render through the host's renderPlan
+      // redaction (see tests/approvalServer.test.ts, which opts in only to
+      // assert the exact previewed payload).
       requireAuth: config.approvalServer.requireAuth,
       ...(config.approvalServer.authToken
         ? { authToken: config.approvalServer.authToken }

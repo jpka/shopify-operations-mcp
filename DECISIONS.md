@@ -17,17 +17,22 @@ does the migration go — minimal shims, or the core's recommended paths?
 **Decision:** three parts, all in. (a) The dependency moves from
 `file:../safe-write-mcp-core` to the npm registry (`^0.4.0`); CI drops its
 sibling-checkout steps and `npm ci` pulls from the registry. (b)
-`PlanManager.executePlan` migrates from the legacy one-step `consume()` to
-the core's two-step handoff: re-read current state, `beginExecute` with the
-fresh digest, run the per-item ledger, `confirmExecuted`. A core
-`DATA_DIGEST_MISMATCH` refusal is translated to the host's `STATE_CHANGED`
-error (same code, same `refused` audit row, executor never called), so the
-observable contract is unchanged. A completed ledger — even with per-item
-failures — is confirmed, preserving single-use (retrying would double-apply
-the succeeded items); an unexpected throw out of the ledger leaves the token
-`executing` as an unknown outcome rather than confirming either way.
-`cancel_order` keeps its `consume()` call: its plan carries `dataDigest: null`,
-so the legacy path still works and there is nothing to migrate. (c) The
+`PlanManager.executePlan` **and** `executeCancelOrder` migrate from the
+legacy one-step `consume()` to the core's two-step handoff: re-read current
+state (a no-op read for cancel, whose plan carries no dataDigest), then
+`beginExecute`, per-item ledger, `confirmExecuted`. For the reversible tools
+the migration is forced — `consume()` without a current digest now fails
+closed. For `cancel_order` it is chosen: the legacy path still works (null
+digest ⇒ digest gate skipped), but it emits `executed` *before* the
+`orderCancel` mutation runs, so a crash in between leaves the audit claiming
+a cancellation that never happened with the token burned — the exact causal
+disconnect the handoff exists to close, on the server's highest-stakes
+operation. A core `DATA_DIGEST_MISMATCH` refusal is translated to the host's
+`STATE_CHANGED` error (same code, same `refused` audit row, executor never
+called). A completed ledger — even with per-item failures — is confirmed,
+preserving single-use (retrying would double-apply the succeeded items); an
+unexpected throw out of the ledger leaves the token `executing` as an unknown
+outcome rather than confirming either way. (c) The
 bearer token is surfaced, not bypassed: `index.ts` prints the token-bearing
 approval URL once on stderr, and two config knobs arrive —
 `approvalServer.requireAuth` (default true, file or
@@ -45,11 +50,21 @@ the legacy `consume()` would have fixed the immediate failures, but
 disconnect the two-step handoff exists to close — and the core marks it
 not-recommended for crash-sensitive paths. The reorder (read current state
 *before* `beginExecute`) is forced by the handoff shape: the core needs the
-current digest up front. Gate ordering is preserved — fingerprint still beats
-digest beats approval — so `PLAN_MISMATCH` and `AWAITING_APPROVAL` surface
-exactly as before, and a drift-refused token stays valid until its TTL (it
-was never begun), which is safe: re-executing the same manifest can only pass
-the digest gate if the world matches the preview again. (c)
+current digest up front. Gate ordering, stated honestly: fingerprint still
+beats digest, but digest now beats approval — previously approval beat
+digest, because the old one-step `consume()` enforced approval before the
+host's own digest check ran. The new order is strictly more actionable (a
+drifted-and-unapproved plan reports `STATE_CHANGED` → re-preview, instead of
+`AWAITING_APPROVAL` → wait for a human → `STATE_CHANGED` after they
+bothered), and `PLAN_MISMATCH` still surfaces exactly as before. Two costs
+ride along and are accepted: the current-state re-read now runs before any
+gate, so refused tokens (unknown/rejected/expired/used) each cost one wasted
+billable read; and a re-read failure fails closed before any gate evaluates —
+the safe direction (never execute without a successful re-read), at the price
+that a structured refusal during an outage becomes a raw read error. A
+drift-refused token stays valid until its TTL (it was never begun), which is
+safe: re-executing the same manifest can only pass the digest gate if the
+world matches the preview again. (c)
 `requireAuth: false` exists only as the core's documented explicit opt-out;
 defaulting it true keeps the server's threat model honest — loopback binding
 never stopped another local process, the bearer token does. The `authToken`

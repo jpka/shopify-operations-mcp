@@ -8,8 +8,9 @@
  * the token lifecycle, and "the underlying data drifted since the preview"
  * is a property of the host's domain data — exactly the same split
  * sw-postgres-mcp makes with its ROWSET_CHANGED host code. It is represented
- * here as a host error (thrown after the token has been consumed and a
- * "refused" audit row recorded), never as a reused core PlanError.
+ * here as a host error (thrown after a "refused" audit row is recorded; the
+ * token itself was never begun, so it stays valid until its TTL), never as a
+ * reused core PlanError.
  */
 export type ExecutionErrorCode = "STATE_CHANGED" | "HARD_MAX_ITEMS_EXCEEDED";
 

@@ -234,6 +234,8 @@ export class PlanManager<
     const begun = this.store.beginExecute(planToken, manifest, currentDigest);
     if (!begun.ok) {
       if (begun.error.code === "DATA_DIGEST_MISMATCH") {
+        // Defensive fallback: the core only reaches the digest gate for a
+        // token it found, so meta is non-null on this path in practice.
         const meta = begun.meta ?? {
           tool: "unknown",
           reason: null,
@@ -265,9 +267,20 @@ export class PlanManager<
     const ledger = await runLedger(manifest.items, this.executor);
     const confirmed = this.store.confirmExecuted(planToken);
     if (!confirmed.ok) {
-      // Unreachable: nothing between beginExecute and confirmExecuted can
-      // settle this token (the ledger performs side effects, not plan
-      // transitions), so the token must still be executing here.
+      // Unreachable in-process: nothing between beginExecute and
+      // confirmExecuted can settle this token (the ledger performs side
+      // effects, not plan transitions). Emit before throwing so an execution
+      // whose mutations already applied is never invisible in this server's
+      // own audit trail — the core error alone would leave no host row.
+      this.emit(
+        startedAt,
+        planToken,
+        "executed",
+        meta,
+        `CONFIRM_FAILED (${confirmed.error.code}) after the ledger completed ` +
+          `(succeeded=${ledger.succeeded.length}, failed=${ledger.failed.length}); ` +
+          `side effects may have applied — do not blindly retry`,
+      );
       throw confirmed.error;
     }
     this.emit(
